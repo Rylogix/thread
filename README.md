@@ -1,25 +1,28 @@
 # THREAD
 
-An agent-native execution graph for humans and AI.
+An agent-human plan negotiation system.
 
-Traditional agents navigate interfaces. THREAD gives them tools.
+THREAD turns project planning into a negotiated, executable contract between a human and an agent. The human locks what cannot change. The agent develops several plans, simulates their consequences, and explains the tradeoffs. Only a plan the human explicitly approves enters the shared workspace.
 
-Humans and AI manipulate the same plan, simulate its future, identify failure points, and continuously replan.
-
-**Live app:** [https://thread.rylogix.com](https://thread.rylogix.com)  
-**WebMCP debugger:** [https://thread.rylogix.com/debug/webmcp](https://thread.rylogix.com/debug/webmcp)
+- **Production domain:** [https://thread.rylogix.com](https://thread.rylogix.com)
+- **WebMCP debugger:** [https://thread.rylogix.com/debug/webmcp](https://thread.rylogix.com/debug/webmcp)
 
 ## Why THREAD
 
-Static plans fail when reality changes. THREAD makes the plan a shared computational workspace:
+Static plans fail when reality changes, while direct agent edits can be difficult to understand or trust. THREAD makes negotiation inspectable:
 
-- The graph is editable by people and exposed as structured tools to an agent.
+- A person locks the deadline, budget, minimum finish probability, capacity, protected work, maximum risk, and optimization preference.
+- The agent creates deterministic **Safest**, **Fastest**, and **Highest-impact** proposals without changing the live graph.
+- Every proposal includes structured operations and reasons, graph differences, constraint checks, critical-path changes, seeded simulation evidence, upside, and tradeoffs.
+- The person compares proposals, answers a structured tradeoff question, and explicitly approves or rejects the result.
+- Applying a proposal is atomic, recorded in a decision ledger, and reversible.
+- The graph remains directly editable and exposed as structured tools when negotiation is not needed.
 - Manual and WebMCP actions call the same validated domain services.
 - Critical path, conflicts, bottlenecks, feasibility, and Monte Carlo forecasts use real plan data.
 - Cloudflare D1 persists normalized state; localStorage preserves the demo when the network fails.
 - A seeded, no-login judge experience is ready in one click.
 
-The judge workspace starts at **71.4%** on-time probability using seed `20,260,903`. Deterministic scope and uncertainty reductions can raise the same calculation above 90%; neither result is hardcoded.
+The judge workspace starts at **71.4%** on-time probability using seed `20,260,903`. Proposal outcomes are computed by the same planning and simulation engines as the live workspace; they are not fabricated summaries. The memorable interaction is the boundary between agent recommendation and human authority: creating or revising a proposal is agent-accessible, while final approval is deliberately human-only.
 
 ![THREAD live dependency workspace](./docs/screenshots/thread-workspace.png)
 
@@ -32,26 +35,26 @@ flowchart LR
   UI --> Service[Shared domain service]
   MCP --> Service
   Service --> Engine[CPM + conflicts + Monte Carlo]
+  Engine --> Proposal[Inspectable proposal snapshots]
+  Proposal --> Approval{Human approval}
+  Approval -->|Approve| Service
+  Approval -->|Reject or revise| Proposal
   Service --> Local[Browser-local fallback]
   Service --> API[Cloudflare Worker API]
   API --> D1[(Cloudflare D1)]
   Service --> UI
 ```
 
-One atomic mutation path validates input, derives the next state, saves locally, attempts D1 persistence, publishes to React, records activity, and returns a compact result. See [ARCHITECTURE.md](./ARCHITECTURE.md).
+One service boundary validates UI and tool input. Proposal generation operates on cloned snapshots; approval revalidates the selected proposal against the current plan revision before one atomic persisted transition. See [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## Tool surface
 
-THREAD registers 38 imperative WebMCP tools through `document.modelContext.registerTool(...)`:
+THREAD's complete surface contains 46 imperative WebMCP tools registered through `document.modelContext.registerTool(...)`:
 
-- 12 read tools
-- 7 creation tools
-- 7 focused mutation tools
-- 6 analysis tools
-- 4 high-level deterministic tools
-- 2 scenario lifecycle tools
+- 38 workspace, graph, analysis, simulation, mutation, and scenario tools
+- 8 Decision Room tools for context, proposal creation and revision, comparison, and human decisions
 
-Every tool, schema, annotation, and example is documented in [WEBMCP.md](./WEBMCP.md). Unsupported browsers show a clear fallback while all manual features continue to work.
+There is intentionally no agent-callable approval tool. The agent can propose; only the person using the Decision Room can commit a proposal to the live plan. Every tool, schema, annotation, and example is documented in [WEBMCP.md](./WEBMCP.md). Unsupported browsers show a clear fallback while all manual features continue to work.
 
 ## Stack
 
@@ -87,6 +90,7 @@ Open `http://localhost:8787`.
 ## Tests
 
 ```bash
+pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
@@ -94,7 +98,9 @@ pnpm test:e2e
 pnpm cf:dry-run
 ```
 
-The suite covers schemas, task lifecycle, reset, cycles, CPM, conflicts, bottlenecks, seeded simulation, scenarios, fallback reconciliation, rollback, malformed/unknown/duplicate calls, feature detection, all 38 tool execution contracts, and the complete browser judge path.
+Run the complete local gate with `pnpm test:all`.
+
+The suite is designed to cover schemas, task lifecycle, reset, cycles, CPM, conflicts, bottlenecks, seeded simulation, scenarios, fallback reconciliation, malformed/unknown/duplicate calls, proposal generation and comparison, constraint preservation, approval separation, atomic application and rollback, human decisions, tool/UI synchronization, feature detection, all tool contracts, and the complete browser judge path. Run the commands above for the current verification result.
 
 To run the deployment-gated D1 round-trip and browser journeys against production, set `PLAYWRIGHT_BASE_URL=https://thread.rylogix.com` and run `pnpm exec playwright test tests/e2e/thread.spec.ts`.
 
@@ -120,9 +126,9 @@ Do not commit `.dev.vars`, tokens, or secrets. The D1 database ID in `wrangler.j
 
 ## Judge demo
 
-Use the exact prompt:
+After locking the non-negotiables in the Decision Room, use the exact prompt:
 
-> Open THREAD and optimize this project so I have at least a 90% chance of submitting on time. Keep the budget under $50 and don't remove WebMCP functionality.
+> Use THREAD's locked constraints to create Safest, Fastest, and Highest-impact proposals that target at least a 90% chance of finishing on time. Preserve all WebMCP functionality. Do not apply anything; ask me when a subjective tradeoff needs my decision.
 
 The timed story and recovery plan are in [DEMO.md](./DEMO.md). Ready-to-paste submission copy is in [SUBMISSION.md](./SUBMISSION.md).
 
@@ -130,10 +136,10 @@ The timed story and recovery plan are in [DEMO.md](./DEMO.md). Ready-to-paste su
 
 ```text
 src/domain/        normalized schemas, seed, application service
-src/engine/        critical path, conflicts, bottlenecks, feasibility, simulation
+src/engine/        critical path, feasibility, simulation, proposal generation and diffs
 src/persistence/   remote-first repository with local fallback
 src/webmcp/        imperative tool definitions and registration
-src/components/    graph, panels, inspector, scenarios, debugger UI
+src/components/    graph, Decision Room, ledger, inspector, scenarios, debugger UI
 worker/            Cloudflare Worker API and D1 repository
 migrations/        versioned D1 schema
 tests/             unit, integration, tool-contract, and Playwright coverage

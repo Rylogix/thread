@@ -2,11 +2,19 @@ import { z } from "zod";
 import { calculateCriticalPath, topologicalSort } from "../engine/criticalPath";
 import { detectConflicts } from "../engine/conflicts";
 import { calculateFeasibility, findBottlenecks } from "../engine/feasibility";
+import { validateWorkspaceStateInvariants } from "../engine/invariants";
+import {
+  applyOperationsToPlan,
+  collectEvidence,
+  evaluateProposalConstraints,
+  generatePlanProposal,
+} from "../engine/proposals";
 import { runSimulation as simulate } from "../engine/simulation";
 import type { WorkspaceRepository } from "../persistence/repository";
 import {
   constraintSchema,
   createTaskInputSchema,
+  decisionPolicySchema,
   dependencySchema,
   formatValidationError,
   resourceSchema,
@@ -22,10 +30,15 @@ import { createDemoWorkspace } from "./seed";
 import type {
   Actor,
   Constraint,
+  DecisionLedgerEvidence,
+  DecisionPolicy,
   Dependency,
+  HumanDecision,
   MutationMeta,
   PlanOperation,
+  PlanProposal,
   PlanSnapshot,
+  ProposalMode,
   Resource,
   Risk,
   Scenario,
@@ -48,7 +61,8 @@ export class WorkspaceService {
   private state: WorkspaceState | null = null;
   private readonly listeners = new Set<Listener>();
   private readonly agentHistory: WorkspaceState[] = [];
-  private readonly idempotency = new Map<string, unknown>();
+  private readonly idempotency = new Map<string, { fingerprint: string; result: unknown }>();
+  private mutationQueue: Promise<void> = Promise.resolve();
   private agentBusy = false;
   private highlightedTaskId: string | null = null;
 
@@ -56,6 +70,15 @@ export class WorkspaceService {
 
   async initialize(): Promise<WorkspaceState | null> {
     this.state = await this.repository.load(this.workspaceId);
+    if (this.state) {
+      const repaired = this.state.scenarios.reduce((count, scenario) => count + repairDuplicateDependencyIds(scenario.snapshot), 0);
+      if (repaired > 0) {
+        this.state.workspace.updatedAt = new Date().toISOString();
+        this.state.activity.push(this.activity(this.state, "system", "storage.migrated", `Repaired ${repaired} legacy scenario dependency IDs`, { repaired }));
+        const result = await this.repository.save(this.state);
+        this.state.storageMode = result.mode;
+      }
+    }
     this.emit();
     return this.getState();
   }
@@ -96,16 +119,453 @@ export class WorkspaceService {
   findBottlenecks() { return findBottlenecks(this.requireState()); }
   calculateFeasibility() { const state = this.requireState(); return calculateFeasibility(state, state.lastSimulation ?? undefined); }
 
+  getDecisionContext() {
+    const state = this.requireState();
+    const plan = this.toPlan(state);
+    const evidence = collectEvidence(plan, 20_260_903, 1_000, state.workspace.updatedAt);
+    return {
+      workspaceId: state.workspace.id,
+      planRevision: state.planRevision,
+      policy: structuredClone(state.decisionPolicy),
+      lockedTasks: state.decisionPolicy.preservedTaskIds.map((taskId) => {
+        const task = state.tasks.find((candidate) => candidate.id === taskId);
+        return { taskId, title: task?.title ?? "Missing task" };
+      }),
+      evidence,
+      openDecisionCount: state.humanDecisions.filter((decision) => decision.status === "open").length,
+      proposalCount: state.planProposals.length,
+    };
+  }
+
+  getPlanProposals(): PlanProposal[] {
+    return structuredClone(this.requireState().planProposals).sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  }
+
+  getPlanProposal(proposalId: string): PlanProposal {
+    const proposal = this.requireState().planProposals.find((candidate) => candidate.id === proposalId);
+    if (!proposal) throw new ApplicationError(`Unknown proposal: ${proposalId}`, "not-found");
+    return structuredClone(proposal);
+  }
+
+  comparePlanProposals(proposalIds: string[]) {
+    const parsed = z.array(z.string().uuid()).min(2).max(4).safeParse(proposalIds);
+    if (!parsed.success) throw this.validation(parsed.error);
+    const proposals = parsed.data.map((proposalId) => this.getPlanProposal(proposalId));
+    const baseRevision = proposals[0]!.basePlanRevision;
+    if (proposals.some((proposal) => proposal.basePlanRevision !== baseRevision)) {
+      throw new ApplicationError("Only proposals from the same live-plan revision can be compared", "conflict");
+    }
+    const seed = proposals[0]!.simulationSeed;
+    const iterations = proposals[0]!.simulationIterations;
+    if (proposals.some((proposal) => proposal.simulationSeed !== seed || proposal.simulationIterations !== iterations)) {
+      throw new ApplicationError("Proposal evidence must use the same seed and iteration count", "conflict");
+    }
+    return {
+      basePlanRevision: baseRevision,
+      seed,
+      iterations,
+      proposals: proposals.map((proposal) => ({
+        id: proposal.id,
+        name: proposal.name,
+        mode: proposal.mode,
+        status: proposal.status,
+        probability: proposal.after.simulation.onTimeProbability,
+        probabilityDelta: round(proposal.after.simulation.onTimeProbability - proposal.before.simulation.onTimeProbability),
+        p80Hours: proposal.after.simulation.p80CompletionHours,
+        p80Delta: round(proposal.after.simulation.p80CompletionHours - proposal.before.simulation.p80CompletionHours),
+        maximumCost: proposal.after.simulation.projectedCostRange.maximum,
+        taskDelta: proposal.after.taskCount - proposal.before.taskCount,
+        constraintsPassed: proposal.constraintChecks.filter((check) => check.passed).length,
+        constraintsTotal: proposal.constraintChecks.length,
+        diff: proposal.diff,
+      })),
+    };
+  }
+
+  getHumanDecisions(): HumanDecision[] {
+    return structuredClone(this.requireState().humanDecisions).sort((a, b) => Date.parse(b.requestedAt) - Date.parse(a.requestedAt));
+  }
+
+  async updateDecisionPolicy(input: unknown, meta: MutationMeta): Promise<DecisionPolicy> {
+    this.requireHuman(meta, "Only the human UI can lock or change the decision contract");
+    const parsed = decisionPolicySchema.omit({ updatedAt: true }).partial().strict().safeParse(input);
+    if (!parsed.success) throw this.validation(parsed.error);
+    return this.commit((state) => {
+      const before = structuredClone(state.decisionPolicy);
+      const preservedTaskIds = parsed.data.preservedTaskIds ?? state.decisionPolicy.preservedTaskIds;
+      for (const taskId of preservedTaskIds) this.findTask(state, taskId);
+      state.decisionPolicy = decisionPolicySchema.parse({
+        ...state.decisionPolicy,
+        ...parsed.data,
+        preservedTaskIds: [...new Set(preservedTaskIds)],
+        updatedAt: new Date().toISOString(),
+      });
+      return {
+        result: state.decisionPolicy,
+        message: `${label(meta.actor)} locked the decision contract`,
+        type: "decision.policy.updated",
+        payload: { before, after: state.decisionPolicy },
+        evidence: {
+          action: "Lock decision contract",
+          reason: "Human-authored constraints define the boundary for every agent proposal.",
+          beforeSummary: summarizePolicy(before),
+          afterSummary: summarizePolicy(state.decisionPolicy),
+          result: "success",
+          rollbackAvailable: false,
+        } satisfies DecisionLedgerEvidence,
+      };
+    }, meta, undefined, true);
+  }
+
+  async createPlanProposal(input: unknown, meta: MutationMeta): Promise<PlanProposal> {
+    const parsed = z.object({
+      mode: z.enum(["safest", "fastest", "highest-impact"]),
+      name: z.string().trim().min(1).max(100).optional(),
+      seed: z.number().int().min(1).max(2_147_483_647).default(20_260_903),
+      iterations: z.number().int().min(250).max(5_000).default(1_000),
+      idempotencyKey: z.string().trim().min(1).max(120).optional(),
+    }).strict().safeParse(input);
+    if (!parsed.success) throw this.validation(parsed.error);
+    const requestFingerprint = fingerprintRequest(parsed.data);
+    return this.commit((state) => {
+      if (!state.decisionPolicy.negotiationActive) throw new ApplicationError("Lock the decision contract before creating proposals", "conflict");
+      if (parsed.data.idempotencyKey) {
+        const existing = state.planProposals.find((proposal) => proposal.idempotencyKey === parsed.data.idempotencyKey);
+        if (existing) {
+          if ((existing.requestFingerprint && existing.requestFingerprint !== requestFingerprint) || (!existing.requestFingerprint && (existing.mode !== parsed.data.mode || existing.name !== (parsed.data.name ?? defaultProposalName(parsed.data.mode)) || existing.simulationSeed !== parsed.data.seed || existing.simulationIterations !== parsed.data.iterations))) {
+            throw new ApplicationError("Idempotency key was already used with different proposal input", "conflict");
+          }
+          return { result: existing, message: `${label(meta.actor)} retrieved the existing idempotent proposal`, type: "proposal.reused", payload: { proposalId: existing.id } };
+        }
+      }
+      const proposal = generatePlanProposal(this.toPlan(state), state.decisionPolicy, parsed.data.mode, state.planRevision, {
+        name: parsed.data.name,
+        seed: parsed.data.seed,
+        iterations: parsed.data.iterations,
+        idempotencyKey: parsed.data.idempotencyKey,
+        requestFingerprint,
+        createdBy: meta.actor,
+      });
+      state.planProposals = [...state.planProposals, proposal].slice(-12);
+      this.retainValidDecisionReferences(state);
+      return {
+        result: proposal,
+        message: `${label(meta.actor)} proposed "${proposal.name}" without changing the live plan`,
+        type: "proposal.created",
+        payload: { proposalId: proposal.id, mode: proposal.mode, basePlanRevision: proposal.basePlanRevision },
+        evidence: proposalEvidence(proposal, "Generate plan proposal", "A deterministic alternative was simulated against the locked contract."),
+      };
+    }, meta, undefined, true);
+  }
+
+  async generatePlanProposals(input: unknown, meta: MutationMeta): Promise<PlanProposal[]> {
+    const parsed = z.object({
+      modes: z.array(z.enum(["safest", "fastest", "highest-impact"])).min(1).max(3).default(["safest", "fastest", "highest-impact"]),
+      targetProbability: z.number().min(0).max(99.9).optional(),
+      seed: z.number().int().min(1).max(2_147_483_647).default(20_260_903),
+      iterations: z.number().int().min(250).max(5_000).default(1_000),
+    }).strict().safeParse(input);
+    if (!parsed.success) throw this.validation(parsed.error);
+    const modes = [...new Set(parsed.data.modes)];
+    return this.commit((state) => {
+      if (!state.decisionPolicy.negotiationActive) throw new ApplicationError("Lock the decision contract before creating proposals", "conflict");
+      const policy = {
+        ...state.decisionPolicy,
+        ...(parsed.data.targetProbability === undefined ? {} : { minimumProbability: parsed.data.targetProbability }),
+      };
+      const proposals = modes.map((mode) => generatePlanProposal(this.toPlan(state), policy, mode, state.planRevision, {
+        seed: parsed.data.seed,
+        iterations: parsed.data.iterations,
+        createdBy: meta.actor,
+      }));
+      state.planProposals = [...state.planProposals.filter((proposal) => proposal.status === "applied" || proposal.status === "rolled-back"), ...proposals].slice(-12);
+      this.retainValidDecisionReferences(state);
+      return {
+        result: proposals,
+        message: `${label(meta.actor)} generated ${proposals.length} comparable proposals without changing the live plan`,
+        type: "proposal.set.created",
+        payload: { proposalIds: proposals.map((proposal) => proposal.id), seed: parsed.data.seed, iterations: parsed.data.iterations },
+        evidence: {
+          action: "Generate competing proposals",
+          reason: "Every alternative used the same live revision, seed, and iteration count.",
+          beforeSummary: `${proposals[0]?.before.simulation.onTimeProbability ?? 0}% on time`,
+          afterSummary: proposals.map((proposal) => `${proposal.name}: ${proposal.after.simulation.onTimeProbability}%`).join(" · "),
+          simulation: { beforeProbability: proposals[0]?.before.simulation.onTimeProbability, seed: parsed.data.seed, iterations: parsed.data.iterations },
+          result: "success",
+          rollbackAvailable: false,
+        } satisfies DecisionLedgerEvidence,
+      };
+    }, meta, undefined, true);
+  }
+
+  async revisePlanProposal(input: unknown, meta: MutationMeta): Promise<PlanProposal> {
+    const parsed = z.object({
+      proposalId: z.string().uuid(),
+      preserveTaskIds: z.array(z.string().uuid()).max(500).optional(),
+      preference: z.enum(["balanced", "safety", "speed", "impact", "cost"]).optional(),
+      customResponse: z.string().trim().max(1_000).optional(),
+      idempotencyKey: z.string().trim().min(1).max(120).optional(),
+    }).strict().safeParse(input);
+    if (!parsed.success) throw this.validation(parsed.error);
+    const requestFingerprint = fingerprintRequest(parsed.data);
+    return this.commit((state) => {
+      const index = state.planProposals.findIndex((proposal) => proposal.id === parsed.data.proposalId);
+      if (index < 0) throw new ApplicationError(`Unknown proposal: ${parsed.data.proposalId}`, "not-found");
+      const previous = state.planProposals[index]!;
+      if (["applied", "rolled-back", "rejected"].includes(previous.status)) throw new ApplicationError("This proposal is no longer open for revision", "conflict");
+      if (parsed.data.idempotencyKey && previous.idempotencyKey === parsed.data.idempotencyKey) {
+        if (previous.requestFingerprint !== requestFingerprint) throw new ApplicationError("Idempotency key was already used with different revision input", "conflict");
+        return {
+          result: previous,
+          message: `${label(meta.actor)} retrieved the existing idempotent revision`,
+          type: "proposal.revision.reused",
+          payload: { proposalId: previous.id, revision: previous.revision },
+        };
+      }
+      const preserveTaskIds = [...new Set([...(state.decisionPolicy.preservedTaskIds ?? []), ...(parsed.data.preserveTaskIds ?? [])])];
+      for (const taskId of preserveTaskIds) this.findTask(state, taskId);
+      const policy = { ...state.decisionPolicy, preservedTaskIds: preserveTaskIds, preference: parsed.data.preference ?? state.decisionPolicy.preference };
+      const revisedAt = new Date().toISOString();
+      const revised = generatePlanProposal(this.toPlan(state), policy, previous.mode, state.planRevision, {
+        proposalId: previous.id,
+        name: previous.name,
+        seed: previous.simulationSeed,
+        iterations: previous.simulationIterations,
+        createdAt: revisedAt,
+        createdBy: meta.actor,
+        idempotencyKey: parsed.data.idempotencyKey,
+        requestFingerprint,
+        revision: previous.revision + 1,
+      });
+      revised.createdAt = previous.createdAt;
+      revised.updatedAt = revisedAt;
+      if (parsed.data.customResponse) revised.tradeoffs = [...revised.tradeoffs, `Human guidance: ${parsed.data.customResponse}`];
+      state.planProposals[index] = revised;
+      return {
+        result: revised,
+        message: `${label(meta.actor)} revised "${revised.name}" to revision ${revised.revision}`,
+        type: "proposal.revised",
+        payload: { proposalId: revised.id, revision: revised.revision, preserveTaskIds },
+        evidence: proposalEvidence(revised, "Revise plan proposal", parsed.data.customResponse || "Human decision guidance was incorporated into a new simulated revision."),
+      };
+    }, meta, undefined, true);
+  }
+
+  async requestHumanDecision(input: unknown, meta: MutationMeta): Promise<HumanDecision> {
+    const parsed = z.object({
+      question: z.string().trim().min(1).max(500),
+      context: z.string().max(1_000).default(""),
+      proposalIds: z.array(z.string().uuid()).min(2).max(4),
+      idempotencyKey: z.string().trim().min(1).max(120).optional(),
+    }).strict().safeParse(input);
+    if (!parsed.success) throw this.validation(parsed.error);
+    const requestFingerprint = fingerprintRequest(parsed.data);
+    return this.commit((state) => {
+      if (parsed.data.idempotencyKey) {
+        const existing = state.humanDecisions.find((decision) => decision.idempotencyKey === parsed.data.idempotencyKey);
+        if (existing) {
+          if ((existing.requestFingerprint && existing.requestFingerprint !== requestFingerprint) || (!existing.requestFingerprint && (existing.question !== parsed.data.question || existing.context !== parsed.data.context || JSON.stringify(existing.proposalIds) !== JSON.stringify(parsed.data.proposalIds)))) {
+            throw new ApplicationError("Idempotency key was already used with different decision input", "conflict");
+          }
+          return { result: existing, message: `${label(meta.actor)} retrieved the existing human decision request`, type: "decision.reused", payload: { decisionId: existing.id } };
+        }
+      }
+      const proposals = parsed.data.proposalIds.map((proposalId) => {
+        const proposal = state.planProposals.find((candidate) => candidate.id === proposalId);
+        if (!proposal) throw new ApplicationError(`Unknown proposal: ${proposalId}`, "not-found");
+        if (proposal.basePlanRevision !== state.planRevision) throw new ApplicationError(`Proposal is stale: ${proposal.name}`, "conflict");
+        return proposal;
+      });
+      const comparisonSeed = proposals[0]!.simulationSeed;
+      const comparisonIterations = proposals[0]!.simulationIterations;
+      if (proposals.some((proposal) => proposal.simulationSeed !== comparisonSeed || proposal.simulationIterations !== comparisonIterations)) {
+        throw new ApplicationError("Decision options must use directly comparable evidence", "conflict");
+      }
+      const now = new Date().toISOString();
+      const decision: HumanDecision = {
+        id: crypto.randomUUID(),
+        workspaceId: state.workspace.id,
+        question: parsed.data.question,
+        context: parsed.data.context,
+        proposalIds: proposals.map((proposal) => proposal.id),
+        options: proposals.map((proposal) => ({
+          id: crypto.randomUUID(),
+          proposalId: proposal.id,
+          label: proposal.name,
+          summary: `${proposal.after.simulation.onTimeProbability}% on time · ${proposal.after.simulation.p80CompletionHours}h P80 · $${proposal.after.simulation.projectedCostRange.maximum} P95 cost`,
+          predictedProbability: proposal.after.simulation.onTimeProbability,
+          predictedP80: proposal.after.simulation.p80CompletionHours,
+          predictedCostMaximum: proposal.after.simulation.projectedCostRange.maximum,
+          scopeDelta: proposal.after.taskCount - proposal.before.taskCount,
+        })),
+        status: "open",
+        selectedOptionId: null,
+        customResponse: null,
+        ...(parsed.data.idempotencyKey ? { idempotencyKey: parsed.data.idempotencyKey } : {}),
+        ...(parsed.data.idempotencyKey ? { requestFingerprint } : {}),
+        requestedAt: now,
+        answeredAt: null,
+      };
+      state.humanDecisions = [...state.humanDecisions, decision].slice(-50);
+      for (const proposal of proposals) proposal.status = "awaiting-decision";
+      return {
+        result: decision,
+        message: `${label(meta.actor)} asked for a structured human decision`,
+        type: "decision.requested",
+        payload: { decisionId: decision.id, proposalIds: decision.proposalIds },
+        evidence: {
+          action: "Request human decision",
+          reason: decision.question,
+          decisionId: decision.id,
+          simulation: { seed: comparisonSeed, iterations: comparisonIterations },
+          result: "success",
+          rollbackAvailable: false,
+        } satisfies DecisionLedgerEvidence,
+      };
+    }, meta, undefined, true);
+  }
+
+  async answerHumanDecision(input: unknown, meta: MutationMeta): Promise<HumanDecision> {
+    this.requireHuman(meta, "Only the human UI can answer a decision request");
+    const parsed = z.object({
+      decisionId: z.string().uuid(),
+      optionId: z.string().uuid().optional(),
+      selectedOptionId: z.string().uuid().optional(),
+      customResponse: z.string().trim().max(1_000).optional(),
+    }).strict().refine((value) => Boolean(value.optionId || value.selectedOptionId || value.customResponse), "Select an option or provide a response").safeParse(input);
+    if (!parsed.success) throw this.validation(parsed.error);
+    return this.commit((state) => {
+      const decision = state.humanDecisions.find((candidate) => candidate.id === parsed.data.decisionId);
+      if (!decision) throw new ApplicationError(`Unknown decision: ${parsed.data.decisionId}`, "not-found");
+      if (decision.status === "answered") return { result: decision, message: "Human decision answer already recorded", type: "decision.answer.reused", payload: { decisionId: decision.id } };
+      const optionId = parsed.data.optionId ?? parsed.data.selectedOptionId ?? null;
+      if (optionId && !decision.options.some((option) => option.id === optionId)) throw new ApplicationError("Selected option does not belong to this decision", "validation");
+      decision.status = "answered";
+      decision.selectedOptionId = optionId;
+      decision.customResponse = parsed.data.customResponse ?? null;
+      decision.answeredAt = new Date().toISOString();
+      for (const proposalId of decision.proposalIds) {
+        const proposal = state.planProposals.find((candidate) => candidate.id === proposalId);
+        if (proposal?.status === "awaiting-decision") proposal.status = "ready";
+      }
+      const option = decision.options.find((candidate) => candidate.id === optionId);
+      return {
+        result: decision,
+        message: `${label(meta.actor)} answered the proposal tradeoff`,
+        type: "decision.answered",
+        payload: { decisionId: decision.id, selectedOptionId: optionId, customResponse: decision.customResponse },
+        evidence: {
+          action: "Answer agent question",
+          reason: decision.customResponse || option?.label || "Human supplied structured guidance.",
+          decisionId: decision.id,
+          proposalId: option?.proposalId,
+          result: "success",
+          rollbackAvailable: false,
+        } satisfies DecisionLedgerEvidence,
+      };
+    }, meta, undefined, true);
+  }
+
+  async approvePlanProposal(proposalId: string, meta: MutationMeta): Promise<WorkspaceState> {
+    this.requireHuman(meta, "Only the human UI can approve and apply a plan proposal");
+    return this.commit((state) => {
+      const proposal = state.planProposals.find((candidate) => candidate.id === proposalId);
+      if (!proposal) throw new ApplicationError(`Unknown proposal: ${proposalId}`, "not-found");
+      if (proposal.status !== "ready") throw new ApplicationError("Proposal must be ready and all related decisions answered before approval", "conflict");
+      if (proposal.basePlanRevision !== state.planRevision) throw new ApplicationError("Proposal is stale because the live plan changed; revise it before approval", "conflict");
+      if (state.humanDecisions.some((decision) => decision.status === "open" && decision.proposalIds.includes(proposal.id))) {
+        throw new ApplicationError("Answer the open human decision before approving this proposal", "conflict");
+      }
+      const base = this.toPlan(state);
+      const checks = evaluateProposalConstraints(base, proposal.proposedPlan, state.decisionPolicy, proposal.after);
+      const violated = checks.filter((check) => !check.passed);
+      if (violated.length) throw new ApplicationError(`Locked contract violated: ${violated.map((check) => check.label).join(", ")}`, "conflict");
+      const now = new Date().toISOString();
+      state.lastProposalApplication = { proposalId: proposal.id, previousPlan: base, previousPlanRevision: state.planRevision, appliedAt: now };
+      this.replaceLivePlan(state, proposal.proposedPlan);
+      proposal.status = "applied";
+      proposal.constraintChecks = checks;
+      proposal.updatedAt = now;
+      state.lastSimulation = proposal.after.simulation;
+      return {
+        result: state,
+        message: `${label(meta.actor)} approved and atomically applied "${proposal.name}"`,
+        type: "proposal.applied",
+        payload: { proposalId: proposal.id, revision: proposal.revision, operations: proposal.operations.length },
+        evidence: proposalEvidence(proposal, "Approve and apply proposal", "The human accepted the simulated operations; the live graph changed in one atomic commit.", true),
+      };
+    }, meta, undefined, true);
+  }
+
+  async rejectPlanProposal(proposalId: string, meta: MutationMeta): Promise<PlanProposal> {
+    this.requireHuman(meta, "Only the human UI can reject a plan proposal");
+    return this.commit((state) => {
+      const proposal = state.planProposals.find((candidate) => candidate.id === proposalId);
+      if (!proposal) throw new ApplicationError(`Unknown proposal: ${proposalId}`, "not-found");
+      if (proposal.status === "applied" || proposal.status === "rolled-back") throw new ApplicationError("Applied proposal cannot be rejected", "conflict");
+      proposal.status = "rejected";
+      proposal.updatedAt = new Date().toISOString();
+      return {
+        result: proposal,
+        message: `${label(meta.actor)} rejected "${proposal.name}"; the live plan was unchanged`,
+        type: "proposal.rejected",
+        payload: { proposalId: proposal.id },
+        evidence: {
+          ...proposalEvidence(proposal, "Reject plan proposal", "Human declined the simulated alternative; no live-plan operations were executed."),
+          result: "rejected" as const,
+        },
+      };
+    }, meta, undefined, true);
+  }
+
+  async undoProposalApplication(meta: MutationMeta): Promise<WorkspaceState> {
+    this.requireHuman(meta, "Only the human UI can undo an applied proposal");
+    return this.commit((state) => {
+      const application = state.lastProposalApplication;
+      if (!application) throw new ApplicationError("No applied proposal is available to undo", "not-found");
+      const proposal = state.planProposals.find((candidate) => candidate.id === application.proposalId);
+      const currentPlan = this.toPlan(state);
+      this.replaceLivePlan(state, application.previousPlan);
+      if (proposal) {
+        proposal.status = "rolled-back";
+        proposal.updatedAt = new Date().toISOString();
+      }
+      state.lastProposalApplication = null;
+      state.lastSimulation = null;
+      return {
+        result: state,
+        message: `${label(meta.actor)} restored the exact pre-proposal plan`,
+        type: "proposal.rolled-back",
+        payload: { proposalId: application.proposalId, restoredRevision: application.previousPlanRevision },
+        evidence: {
+          action: "Undo applied proposal",
+          reason: "The persisted pre-approval graph was restored atomically.",
+          beforeSummary: `${currentPlan.tasks.length} tasks in the applied plan`,
+          afterSummary: `${application.previousPlan.tasks.length} tasks in the restored plan`,
+          proposalId: application.proposalId,
+          result: "rolled-back",
+          rollbackAvailable: false,
+        } satisfies DecisionLedgerEvidence,
+      };
+    }, meta, undefined, true);
+  }
+
+  async rollbackAppliedProposal(meta: MutationMeta): Promise<WorkspaceState> {
+    return this.undoProposalApplication(meta);
+  }
+
   async resetDemo(meta: MutationMeta = { actor: "human" }): Promise<WorkspaceState> {
-    const previous = this.state;
-    const next = createDemoWorkspace(this.workspaceId);
-    next.activity.push(this.activity(next, meta.actor, "demo.reset", `${label(meta.actor)} reset the hackathon demo`, {}));
-    const result = await this.repository.save(next);
-    next.storageMode = result.mode;
-    if (previous && meta.actor === "agent") this.rememberAgentState(previous);
-    this.state = next;
-    this.emit();
-    return this.getState()!;
+    return this.enqueue(async () => {
+      const previous = this.state;
+      const next = createDemoWorkspace(this.workspaceId);
+      next.activity.push(this.activity(next, meta.actor, "demo.reset", `${label(meta.actor)} reset the hackathon demo`, {}));
+      const result = await this.repository.save(next);
+      next.storageMode = result.mode;
+      if (previous && meta.actor === "agent") this.rememberAgentState(previous);
+      this.state = next;
+      this.emit();
+      return this.getState()!;
+    });
   }
 
   async updateWorkspace(input: unknown, meta: MutationMeta): Promise<WorkspaceState["workspace"]> {
@@ -119,9 +579,16 @@ export class WorkspaceService {
   }
 
   async createTask(input: unknown, meta: MutationMeta): Promise<Task> {
-    if (meta.idempotencyKey && this.idempotency.has(meta.idempotencyKey)) return structuredClone(this.idempotency.get(meta.idempotencyKey) as Task);
     const parsed = createTaskInputSchema.safeParse(input);
     if (!parsed.success) throw this.validation(parsed.error);
+    const fingerprint = JSON.stringify(parsed.data);
+    if (meta.idempotencyKey) {
+      const previous = this.idempotency.get(meta.idempotencyKey);
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) throw new ApplicationError("Idempotency key was already used with different task input", "conflict");
+        return structuredClone(previous.result as Task);
+      }
+    }
     const state = this.requireState();
     if (parsed.data.id) {
       const existing = state.tasks.find((task) => task.id === parsed.data.id);
@@ -143,7 +610,7 @@ export class WorkspaceService {
       draft.tasks.push(task);
       return { result: task, message: `${label(meta.actor)} created "${task.title}"`, type: `${task.kind}.created`, payload: { taskId: task.id } };
     }, meta, task.id);
-    if (meta.idempotencyKey) this.idempotency.set(meta.idempotencyKey, created);
+    if (meta.idempotencyKey) this.idempotency.set(meta.idempotencyKey, { fingerprint, result: created });
     return created;
   }
 
@@ -350,7 +817,10 @@ export class WorkspaceService {
     const state = this.requireState();
     const selected = scenarioIds?.length ? state.scenarios.filter((scenario) => scenarioIds.includes(scenario.id)) : state.scenarios;
     if (scenarioIds?.some((scenarioId) => !selected.some((scenario) => scenario.id === scenarioId))) throw new ApplicationError("One or more scenario IDs are unknown", "not-found");
-    return selected.map((scenario) => ({ scenarioId: scenario.id, name: scenario.name, simulation: simulate(scenario.snapshot, { iterations: 750 }), feasibility: calculateFeasibility(scenario.snapshot) }));
+    return selected.map((scenario) => {
+      const simulation = simulate(scenario.snapshot, { iterations: 1_000, seed: 20_260_903, calculatedAt: scenario.createdAt });
+      return { scenarioId: scenario.id, name: scenario.name, simulation, feasibility: calculateFeasibility(scenario.snapshot, simulation) };
+    });
   }
 
   async runSimulation(input: unknown, meta: MutationMeta): Promise<SimulationResult> {
@@ -369,28 +839,30 @@ export class WorkspaceService {
 
   async applyPlan(operations: PlanOperation[], meta: MutationMeta): Promise<{ applied: number; state: WorkspaceState }> {
     if (!Array.isArray(operations) || operations.length === 0 || operations.length > 25) throw new ApplicationError("Plan must contain 1 to 25 operations", "validation");
-    let applied = 0;
-    for (const operation of operations) {
-      switch (operation.type) {
-        case "create_task": await this.createTask(operation.input, meta); break;
-        case "update_task": await this.updateTask(operation.input, meta); break;
-        case "create_dependency": await this.createDependency(operation.input, meta); break;
-        case "complete_task": await this.completeTask(operation.input, meta); break;
-        case "resolve_risk": await this.resolveRisk(operation.input, meta); break;
-        case "update_workspace": await this.updateWorkspace(operation.input, meta); break;
-        default: throw new ApplicationError(`Unsupported plan operation`, "validation");
+    return this.commit((state) => {
+      let nextPlan: PlanSnapshot;
+      try {
+        nextPlan = applyOperationsToPlan(this.toPlan(state), operations);
+      } catch (error) {
+        if (error instanceof z.ZodError) throw this.validation(error);
+        throw new ApplicationError(error instanceof Error ? error.message : "Invalid plan operation", "validation");
       }
-      applied += 1;
-    }
-    return { applied, state: this.getState()! };
+      this.replaceLivePlan(state, nextPlan);
+      return {
+        result: { applied: operations.length, state },
+        message: `${label(meta.actor)} atomically applied ${operations.length} plan operations`,
+        type: "plan.applied",
+        payload: { applied: operations.length, operationTypes: operations.map((operation) => operation.type) },
+      };
+    }, meta);
   }
 
   async optimizePlan(input: unknown, meta: MutationMeta): Promise<{ changes: string[]; feasibility: ReturnType<typeof calculateFeasibility> }> {
     const parsed = z.object({ targetProbability: z.number().min(50).max(99).default(90), preserveTaskIds: z.array(z.string().uuid()).default([]) }).strict().safeParse(input);
     if (!parsed.success) throw this.validation(parsed.error);
-    const before = this.calculateFeasibility().percentage;
-    const changes: string[] = [];
-    await this.commit((state) => {
+    return this.commit((state) => {
+      const beforeSimulation = simulate(this.toPlan(state), { iterations: 1_500, seed: 20_260_903, calculatedAt: state.workspace.updatedAt });
+      const changes: string[] = [];
       const candidates = findBottlenecks(state).filter((item) => !parsed.data.preserveTaskIds.includes(item.taskId));
       for (const candidate of candidates.slice(0, 4)) {
         const task = this.findTask(state, candidate.taskId);
@@ -405,12 +877,25 @@ export class WorkspaceService {
         risk.probability = round(risk.probability * 0.55);
         changes.push(`${risk.title}: mitigation lowered probability`);
       }
-      return { result: undefined, message: `${label(meta.actor)} optimized ${changes.length} plan variables`, type: "plan.optimized", payload: { changes, targetProbability: parsed.data.targetProbability } };
-    }, meta);
-    const simulation = await this.runSimulation({ iterations: 1_500 }, meta);
-    const feasibility = calculateFeasibility(this.requireState(), simulation);
-    this.requireState().activity.at(-1)!.payload = { ...this.requireState().activity.at(-1)!.payload, before, after: feasibility.percentage };
-    return { changes, feasibility };
+      const simulation = simulate(this.toPlan(state), { iterations: 1_500, seed: 20_260_903, calculatedAt: new Date().toISOString() });
+      state.lastSimulation = simulation;
+      const feasibility = calculateFeasibility(state, simulation);
+      return {
+        result: { changes, feasibility },
+        message: `${label(meta.actor)} optimized ${changes.length} plan variables`,
+        type: "plan.optimized",
+        payload: { changes, targetProbability: parsed.data.targetProbability, before: beforeSimulation.onTimeProbability, after: simulation.onTimeProbability },
+        evidence: {
+          action: "Optimize live plan",
+          reason: `Direct optimization was requested while no decision contract was active; target ${parsed.data.targetProbability}%.`,
+          beforeSummary: `${beforeSimulation.onTimeProbability}% on time`,
+          afterSummary: `${simulation.onTimeProbability}% on time`,
+          simulation: { beforeProbability: beforeSimulation.onTimeProbability, afterProbability: simulation.onTimeProbability, seed: simulation.seed, iterations: simulation.iterations },
+          result: "success",
+          rollbackAvailable: meta.actor === "agent",
+        } satisfies DecisionLedgerEvidence,
+      };
+    }, meta, undefined, true);
   }
 
   async replanRemainingWork(meta: MutationMeta): Promise<{ reorderedTaskIds: string[]; criticalPath: ReturnType<typeof calculateCriticalPath> }> {
@@ -449,56 +934,79 @@ export class WorkspaceService {
   }
 
   async rollbackLastAgentAction(): Promise<WorkspaceState> {
-    const previous = this.agentHistory.pop();
-    if (!previous) throw new ApplicationError("No agent mutation is available to roll back", "not-found");
-    const next = structuredClone(previous);
-    next.activity.push(this.activity(next, "agent", "agent.rollback", "Agent rolled back its last mutation", {}));
-    next.workspace.updatedAt = new Date().toISOString();
-    const result = await this.repository.save(next);
-    next.storageMode = result.mode;
-    this.state = next;
-    this.emit();
-    return this.getState()!;
+    return this.enqueue(async () => {
+      if (this.requireState().decisionPolicy.negotiationActive) {
+        throw new ApplicationError("The active decision contract requires human-controlled proposal undo", "conflict");
+      }
+      const previous = this.agentHistory.pop();
+      if (!previous) throw new ApplicationError("No agent mutation is available to roll back", "not-found");
+      const next = structuredClone(previous);
+      next.activity.push(this.activity(next, "agent", "agent.rollback", "Agent rolled back its last mutation", {}));
+      next.workspace.updatedAt = new Date().toISOString();
+      next.planRevision += 1;
+      const result = await this.repository.save(next);
+      next.storageMode = result.mode;
+      this.state = next;
+      this.emit();
+      return this.getState()!;
+    });
   }
 
   private async commit<T>(
-    mutate: (draft: WorkspaceState) => { result: T; message: string; type: string; payload: Record<string, unknown> },
+    mutate: (draft: WorkspaceState) => { result: T; message: string; type: string; payload: Record<string, unknown>; evidence?: DecisionLedgerEvidence },
     meta: MutationMeta,
     highlightedTaskId?: string,
     keepSimulation = false,
   ): Promise<T> {
-    const current = this.requireState();
-    const draft = structuredClone(current);
-    if (meta.actor === "agent") {
-      this.agentBusy = true;
-      this.highlightedTaskId = highlightedTaskId ?? null;
-      this.emit();
-    }
-    try {
-      const outcome = mutate(draft);
-      draft.workspace.updatedAt = new Date().toISOString();
-      if (!keepSimulation && outcome.type !== "simulation.completed") draft.lastSimulation = null;
-      draft.activity.push(this.activity(draft, meta.actor, outcome.type, outcome.message, outcome.payload));
-      if (draft.activity.length > 500) draft.activity = draft.activity.slice(-500);
-      workspaceStateSchema.parse(draft);
-      const saveResult = await this.repository.save(draft);
-      draft.storageMode = saveResult.mode;
-      if (saveResult.warning) draft.activity.push(this.activity(draft, "system", "persistence.fallback", "D1 unavailable; changes saved in this browser", { warning: saveResult.warning }));
-      if (meta.actor === "agent") this.rememberAgentState(current);
-      this.state = draft;
-      this.emit();
-      return structuredClone(outcome.result);
-    } catch (error) {
-      if (error instanceof ApplicationError) throw error;
-      if (error instanceof z.ZodError) throw this.validation(error);
-      throw error;
-    } finally {
+    return this.enqueue(async () => {
+      const current = this.requireState();
+      const draft = structuredClone(current);
       if (meta.actor === "agent") {
-        this.agentBusy = false;
-        globalThis.setTimeout(() => { this.highlightedTaskId = null; this.emit(); }, 850);
+        this.agentBusy = true;
+        this.highlightedTaskId = highlightedTaskId ?? null;
         this.emit();
       }
-    }
+      try {
+        const outcome = mutate(draft);
+        const livePlanMutation = isLivePlanMutation(outcome.type);
+        if (meta.actor === "agent" && current.decisionPolicy.negotiationActive && livePlanMutation) {
+          throw new ApplicationError("The active decision contract requires an agent proposal; the live plan was not changed", "conflict");
+        }
+        if (livePlanMutation) draft.planRevision = current.planRevision + 1;
+        draft.workspace.updatedAt = new Date().toISOString();
+        if (!keepSimulation && outcome.type !== "simulation.completed") draft.lastSimulation = null;
+        const invariantErrors = validateWorkspaceStateInvariants(draft);
+        if (invariantErrors.length) throw new ApplicationError(invariantErrors.join("; "), "validation");
+        draft.activity.push(this.activity(draft, meta.actor, outcome.type, outcome.message, outcome.payload, outcome.evidence));
+        if (draft.activity.length > 500) draft.activity = draft.activity.slice(-500);
+        workspaceStateSchema.parse(draft);
+        const saveResult = await this.repository.save(draft);
+        draft.storageMode = saveResult.mode;
+        if (saveResult.warning) {
+          draft.activity.push(this.activity(draft, "system", "persistence.fallback", "D1 unavailable; changes saved in this browser", { warning: saveResult.warning }, {
+            action: "Persist workspace",
+            reason: saveResult.warning,
+            result: "error",
+            rollbackAvailable: false,
+          }));
+          await this.repository.save(draft);
+        }
+        if (meta.actor === "agent" && livePlanMutation) this.rememberAgentState(current);
+        this.state = draft;
+        this.emit();
+        return structuredClone(outcome.result);
+      } catch (error) {
+        if (error instanceof ApplicationError) throw error;
+        if (error instanceof z.ZodError) throw this.validation(error);
+        throw error;
+      } finally {
+        if (meta.actor === "agent") {
+          this.agentBusy = false;
+          globalThis.setTimeout(() => { this.highlightedTaskId = null; this.emit(); }, 850);
+          this.emit();
+        }
+      }
+    });
   }
 
   private requireState(): WorkspaceState {
@@ -516,8 +1024,37 @@ export class WorkspaceService {
     return structuredClone({ workspace: state.workspace, tasks: state.tasks, dependencies: state.dependencies, constraints: state.constraints, resources: state.resources, risks: state.risks });
   }
 
-  private activity(state: WorkspaceState, actor: Actor, type: string, message: string, payload: Record<string, unknown>) {
-    return { id: crypto.randomUUID(), workspaceId: state.workspace.id, actor, type, message, payload, createdAt: new Date().toISOString() } as const;
+  private activity(state: WorkspaceState, actor: Actor, type: string, message: string, payload: Record<string, unknown>, evidence?: DecisionLedgerEvidence) {
+    return { id: crypto.randomUUID(), workspaceId: state.workspace.id, actor, type, message, payload, ...(evidence ? { evidence } : {}), createdAt: new Date().toISOString() } as const;
+  }
+
+  private replaceLivePlan(state: WorkspaceState, plan: PlanSnapshot): void {
+    const next = structuredClone(plan);
+    state.workspace = next.workspace;
+    state.tasks = next.tasks;
+    state.dependencies = next.dependencies;
+    state.constraints = next.constraints;
+    state.resources = next.resources;
+    state.risks = next.risks;
+    state.workspace.id = this.workspaceId;
+    for (const collection of [state.tasks, state.dependencies, state.constraints, state.resources, state.risks]) {
+      for (const item of collection) item.workspaceId = this.workspaceId;
+    }
+  }
+
+  private retainValidDecisionReferences(state: WorkspaceState): void {
+    const proposalIds = new Set(state.planProposals.map((proposal) => proposal.id));
+    state.humanDecisions = state.humanDecisions.filter((decision) => decision.proposalIds.every((proposalId) => proposalIds.has(proposalId)));
+  }
+
+  private requireHuman(meta: MutationMeta, message: string): void {
+    if (meta.actor !== "human") throw new ApplicationError(message, "conflict");
+  }
+
+  private enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.mutationQueue.then(work, work);
+    this.mutationQueue = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   private rememberAgentState(state: WorkspaceState): void {
@@ -541,6 +1078,60 @@ function label(actor: Actor): string {
 
 function round(value: number): number {
   return Math.round(value * 10) / 10;
+}
+
+function defaultProposalName(mode: ProposalMode): string {
+  return { safest: "Safest plan", fastest: "Fastest plan", "highest-impact": "Highest-impact plan" }[mode];
+}
+
+function summarizePolicy(policy: DecisionPolicy): string {
+  const locks = [
+    policy.deadlineLocked && "deadline",
+    policy.budgetLocked && "budget",
+    policy.minimumProbabilityLocked && `${policy.minimumProbability}% minimum probability`,
+    policy.capacityLocked && "capacity",
+    policy.preservedTaskIds.length > 0 && `${policy.preservedTaskIds.length} protected tasks`,
+    policy.maximumRiskLocked && `${policy.maximumRisk} maximum risk`,
+  ].filter(Boolean);
+  return locks.length ? locks.join(", ") : "No locks";
+}
+
+function proposalEvidence(proposal: PlanProposal, action: string, reason: string, rollbackAvailable = false): DecisionLedgerEvidence {
+  return {
+    action,
+    reason,
+    beforeSummary: `${proposal.before.simulation.onTimeProbability}% on time · ${proposal.before.simulation.p80CompletionHours}h P80`,
+    afterSummary: `${proposal.after.simulation.onTimeProbability}% on time · ${proposal.after.simulation.p80CompletionHours}h P80`,
+    proposalId: proposal.id,
+    simulation: {
+      beforeProbability: proposal.before.simulation.onTimeProbability,
+      afterProbability: proposal.after.simulation.onTimeProbability,
+      seed: proposal.simulationSeed,
+      iterations: proposal.simulationIterations,
+    },
+    result: "success",
+    rollbackAvailable,
+  };
+}
+
+function isLivePlanMutation(type: string): boolean {
+  if (type === "proposal.applied" || type === "proposal.rolled-back" || type === "scenario.applied") return true;
+  return ["workspace.", "task.", "milestone.", "dependency.", "constraint.", "resource.", "risk.", "plan."].some((prefix) => type.startsWith(prefix));
+}
+
+function repairDuplicateDependencyIds(plan: PlanSnapshot): number {
+  const seen = new Set<string>();
+  let repaired = 0;
+  for (const dependency of plan.dependencies) {
+    if (seen.has(dependency.id)) { dependency.id = crypto.randomUUID(); repaired += 1; }
+    seen.add(dependency.id);
+  }
+  return repaired;
+}
+
+function fingerprintRequest(value: Record<string, unknown>): string {
+  const { idempotencyKey: _, ...payload } = value;
+  return JSON.stringify(payload);
 }
 
 export function priorityRank(priority: TaskPriority): number {

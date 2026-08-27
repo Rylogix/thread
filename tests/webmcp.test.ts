@@ -25,6 +25,8 @@ describe("WebMCP imperative registration", () => {
     expect(tools.find((tool) => tool.name === "get_workspace")?.annotations?.readOnlyHint).toBe(true);
     expect(tools.find((tool) => tool.name === "create_task")?.annotations?.readOnlyHint).toBe(false);
     expect(tools.filter((tool) => tool.category === "analysis")).toHaveLength(6);
+    expect(tools.filter((tool) => tool.category === "negotiation")).toHaveLength(8);
+    expect(tools.some((tool) => tool.name.includes("approve"))).toBe(false);
   });
 
   it("feature-detects unsupported browsers without breaking manual state", async () => {
@@ -52,9 +54,12 @@ describe("WebMCP imperative registration", () => {
   it("rejects malformed tool input and unknown IDs with compact errors", async () => {
     const malformed = await executeThreadTool(service, "create_task", { title: "", estimatedHours: -1 });
     const unknown = await executeThreadTool(service, "get_task", { taskId: crypto.randomUUID() });
+    const unexpected = await executeThreadTool(service, "get_decision_context", { surprise: true });
     expect(malformed.isError).toBe(true);
     expect(unknown.isError).toBe(true);
     expect(unknown.content[0]!.text).toContain("Unknown task");
+    expect(unknown.structuredContent).toMatchObject({ error: { code: "not-found" } });
+    expect(unexpected).toMatchObject({ isError: true, structuredContent: { error: { code: "validation" } } });
   });
 
   it("executes every registered tool contract against real structured state", async () => {
@@ -70,6 +75,38 @@ describe("WebMCP imperative registration", () => {
       switch (name) {
         case "get_task": input = { taskId: state.tasks[0]!.id }; break;
         case "get_activity": input = { limit: 5 }; break;
+        case "get_decision_context": break;
+        case "create_plan_proposal": {
+          await isolated.updateDecisionPolicy({ negotiationActive: true }, { actor: "human" });
+          input = { mode: "safest", seed: 20_260_903, iterations: 250, idempotencyKey: "contract-proposal" };
+          break;
+        }
+        case "get_plan_proposals": input = { status: "ready" }; break;
+        case "get_plan_proposal": {
+          await isolated.updateDecisionPolicy({ negotiationActive: true }, { actor: "human" });
+          const proposal = await isolated.createPlanProposal({ mode: "safest", iterations: 250 }, { actor: "agent" });
+          input = { proposalId: proposal.id };
+          break;
+        }
+        case "compare_plan_proposals": {
+          await isolated.updateDecisionPolicy({ negotiationActive: true }, { actor: "human" });
+          const proposals = await isolated.generatePlanProposals({ modes: ["safest", "fastest"], iterations: 250 }, { actor: "agent" });
+          input = { proposalIds: proposals.map((proposal) => proposal.id) };
+          break;
+        }
+        case "revise_plan_proposal": {
+          await isolated.updateDecisionPolicy({ negotiationActive: true }, { actor: "human" });
+          const proposal = await isolated.createPlanProposal({ mode: "safest", iterations: 250 }, { actor: "agent" });
+          input = { proposalId: proposal.id, preference: "safety", customResponse: "Keep protected scope." };
+          break;
+        }
+        case "request_human_decision": {
+          await isolated.updateDecisionPolicy({ negotiationActive: true }, { actor: "human" });
+          const proposals = await isolated.generatePlanProposals({ modes: ["safest", "fastest"], iterations: 250 }, { actor: "agent" });
+          input = { question: "Which plan should be revised?", proposalIds: proposals.map((proposal) => proposal.id) };
+          break;
+        }
+        case "get_human_decisions": input = { status: "open" }; break;
         case "create_task": input = { title: "Contract task", estimatedHours: 1 }; break;
         case "create_milestone": input = { title: "Contract milestone" }; break;
         case "create_constraint": input = { type: "scope", title: "Contract constraint", value: true, hard: false, description: "Contract" }; break;
@@ -106,4 +143,16 @@ describe("WebMCP imperative registration", () => {
     expect(failures).toEqual([]);
     expect(names).toHaveLength(THREAD_TOOL_COUNT);
   }, 20_000);
+
+  it("keeps proposal creation idempotent and blocks direct agent mutation after locks activate", async () => {
+    await service.updateDecisionPolicy({ negotiationActive: true }, { actor: "human" });
+    const input = { mode: "safest", iterations: 250, idempotencyKey: "durable-retry" };
+    const first = await executeThreadTool(service, "create_plan_proposal", input);
+    const second = await executeThreadTool(service, "create_plan_proposal", input);
+    expect(second.isError).not.toBe(true);
+    expect((first.structuredContent as { id: string }).id).toBe((second.structuredContent as { id: string }).id);
+
+    const blocked = await executeThreadTool(service, "update_task", { taskId: service.getTasks()[1]!.id, confidence: 0.99 });
+    expect(blocked).toMatchObject({ isError: true, structuredContent: { error: { code: "conflict" } } });
+  });
 });

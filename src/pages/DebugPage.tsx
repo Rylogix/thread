@@ -16,6 +16,7 @@ export function DebugPage() {
     const next: DebugResult[] = [];
     try {
       if (!service.getState()) await service.resetDemo({ actor: "system" });
+      if (kind !== "read") await service.resetDemo({ actor: "system" });
       if (kind === "read" || kind === "full") {
         for (const name of ["get_workspace", "get_tasks", "calculate_critical_path", "detect_conflicts"]) {
           const output = await executeThreadTool(service, name);
@@ -37,6 +38,55 @@ export function DebugPage() {
         const malformed = await executeThreadTool(service, "create_task", { estimatedHours: -4 });
         next.push({ label: "malformed input rejected", ok: malformed.isError === true, detail: malformed.content });
         next.push({ label: "tool names unique", ok: new Set(tools.map((tool) => tool.name)).size === THREAD_TOOL_COUNT, detail: `${tools.length} definitions` });
+        next.push({ label: "approval tool intentionally absent", ok: !tools.some((tool) => tool.name.includes("approve")), detail: "Final approval belongs only to the human UI." });
+
+        const liveRevision = service.getState()!.planRevision;
+        await service.updateDecisionPolicy({
+          negotiationActive: true,
+          deadlineLocked: true,
+          budgetLocked: true,
+          minimumProbabilityLocked: true,
+          minimumProbability: 90,
+          capacityLocked: false,
+          preservedTaskIds: service.getTasks().filter((task) => task.title.includes("WebMCP")).map((task) => task.id),
+          maximumRiskLocked: true,
+          maximumRisk: 0.25,
+        }, { actor: "human" });
+        const context = await executeThreadTool(service, "get_decision_context");
+        next.push({ label: "decision context exposes human locks", ok: !context.isError && (context.structuredContent as { planRevision?: number })?.planRevision === liveRevision, detail: context.structuredContent ?? context.content });
+
+        const createdProposals = [] as Array<{ id: string }>;
+        for (const mode of ["safest", "fastest", "highest-impact"] as const) {
+          const output = await executeThreadTool(service, "create_plan_proposal", { mode, iterations: 500, seed: 20_260_903, idempotencyKey: `debug-${mode}` });
+          if (!output.isError) createdProposals.push(output.structuredContent as { id: string });
+          next.push({ label: `create_plan_proposal · ${mode}`, ok: !output.isError, detail: output.structuredContent ?? output.content });
+        }
+        const retry = await executeThreadTool(service, "create_plan_proposal", { mode: "safest", iterations: 500, seed: 20_260_903, idempotencyKey: "debug-safest" });
+        next.push({ label: "idempotent proposal retry", ok: !retry.isError && (retry.structuredContent as { id?: string })?.id === createdProposals[0]?.id, detail: retry.structuredContent ?? retry.content });
+
+        const proposalIds = createdProposals.map((proposal) => proposal.id);
+        const comparison = await executeThreadTool(service, "compare_plan_proposals", { proposalIds });
+        next.push({ label: "same-seed proposal comparison", ok: !comparison.isError && service.getState()!.planRevision === liveRevision, detail: comparison.structuredContent ?? comparison.content });
+        const blockedMutation = await executeThreadTool(service, "update_task", { taskId: service.getTasks()[1]!.id, confidence: 0.99 });
+        next.push({ label: "active contract blocks direct agent mutation", ok: blockedMutation.isError === true && service.getState()!.planRevision === liveRevision, detail: blockedMutation.structuredContent ?? blockedMutation.content });
+
+        const requested = await executeThreadTool(service, "request_human_decision", { question: "Which evidence-backed tradeoff should THREAD prioritize?", context: "Calculated effects only.", proposalIds, idempotencyKey: "debug-decision" });
+        const decision = requested.structuredContent as { id?: string; options?: Array<{ id: string; proposalId: string }> } | undefined;
+        next.push({ label: "structured human decision requested", ok: !requested.isError && Boolean(decision?.id), detail: requested.structuredContent ?? requested.content });
+        const valid = service.getPlanProposals().find((proposal) => proposalIds.includes(proposal.id) && proposal.constraintChecks.every((check) => check.passed));
+        const option = decision?.options?.find((candidate) => candidate.proposalId === valid?.id);
+        if (decision?.id && valid && option) {
+          await service.answerHumanDecision({ decisionId: decision.id, optionId: option.id, customResponse: "Preserve WebMCP scope and use the safest valid evidence." }, { actor: "human" });
+          let agentApprovalRejected = false;
+          try { await service.approvePlanProposal(valid.id, { actor: "agent" }); } catch { agentApprovalRejected = true; }
+          next.push({ label: "agent approval rejected", ok: agentApprovalRejected, detail: "Authority boundary enforced in the shared service." });
+          await service.approvePlanProposal(valid.id, { actor: "human" });
+          next.push({ label: "human approval applied atomically", ok: service.getPlanProposal(valid.id).status === "applied" && service.getState()!.planRevision === liveRevision + 1, detail: service.getActivity(1)[0] });
+          await service.undoProposalApplication({ actor: "human" });
+          next.push({ label: "persisted proposal rollback", ok: service.getPlanProposal(valid.id).status === "rolled-back" && service.getState()!.lastProposalApplication === null, detail: service.getActivity(1)[0] });
+        } else {
+          next.push({ label: "human approval path", ok: false, detail: "No proposal satisfied every locked constraint." });
+        }
         next.push({ label: "native discovery", ok: !supported || (registration?.nativeTools.length ?? 0) > 0, detail: supported ? registration?.nativeTools : "Unsupported browser: feature detection passed" });
       }
     } catch (error) {

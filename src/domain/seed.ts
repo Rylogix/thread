@@ -54,10 +54,10 @@ function makeScenarios(base: PlanSnapshot): Scenario[] {
   ];
   addFeatures.tasks.push(...additions);
   addFeatures.dependencies.push(
-    { id: id(221), workspaceId: base.workspace.id, fromTaskId: id(106), toTaskId: id(121) },
-    { id: id(222), workspaceId: base.workspace.id, fromTaskId: id(121), toTaskId: id(122) },
-    { id: id(223), workspaceId: base.workspace.id, fromTaskId: id(122), toTaskId: id(123) },
-    { id: id(224), workspaceId: base.workspace.id, fromTaskId: id(123), toTaskId: id(114) },
+    { id: id(231), workspaceId: base.workspace.id, fromTaskId: id(106), toTaskId: id(121) },
+    { id: id(232), workspaceId: base.workspace.id, fromTaskId: id(121), toTaskId: id(122) },
+    { id: id(233), workspaceId: base.workspace.id, fromTaskId: id(122), toTaskId: id(123) },
+    { id: id(234), workspaceId: base.workspace.id, fromTaskId: id(123), toTaskId: id(114) },
   );
   return [
     { id: id(401), workspaceId: base.workspace.id, name: "Current", description: "The unmodified seeded plan.", snapshot: current, createdAt: CREATED_AT },
@@ -99,6 +99,23 @@ export function createDemoWorkspace(workspaceId: string): WorkspaceState {
       { id: id(353), workspaceId, taskId: id(109), title: "Deployment instability", probability: 0.3, impact: 0.85, mitigation: "Dry-run, migrate, and verify the custom domain before recording.", resolved: false },
     ],
     scenarios: [],
+    decisionPolicy: {
+      negotiationActive: false,
+      deadlineLocked: false,
+      budgetLocked: false,
+      minimumProbabilityLocked: false,
+      minimumProbability: 90,
+      capacityLocked: false,
+      preservedTaskIds: [],
+      maximumRiskLocked: false,
+      maximumRisk: 0.4,
+      preference: "balanced",
+      updatedAt: CREATED_AT,
+    },
+    planProposals: [],
+    humanDecisions: [],
+    lastProposalApplication: null,
+    planRevision: 1,
     activity,
     lastSimulation: null,
     storageMode: "local",

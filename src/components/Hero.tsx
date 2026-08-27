@@ -4,7 +4,10 @@ import { useThread } from "../app/ThreadProvider";
 
 export function Hero() {
   const { service } = useThread();
-  const start = async () => { await service.resetDemo({ actor: "human" }); };
+  const start = async (guided = false) => {
+    if (guided) window.history.replaceState({}, "", "/?decision-room=guided");
+    await service.resetDemo({ actor: "human" });
+  };
   const copyPrompt = async () => { await navigator.clipboard.writeText(DEMO_PROMPT); };
   return (
     <main className="hero-shell">
@@ -18,10 +21,11 @@ export function Hero() {
           <h1>Turn chaos into a plan<br />you can actually finish.</h1>
           <p className="hero-lede">THREAD gives humans and agents the same structured reality: a live dependency graph, deterministic planning, and reproducible simulation.</p>
           <div className="hero-actions">
-            <button className="primary-button hero-cta" data-testid="try-demo" onClick={() => void start()}>Try the Hackathon Demo <ArrowRight size={19} /></button>
-            <button className="secondary-button" onClick={() => void copyPrompt()}>Copy agent prompt</button>
+            <button className="primary-button hero-cta" data-testid="try-negotiation" onClick={() => void start(true)}>Try agent negotiation demo <ArrowRight size={19} /></button>
+            <button className="secondary-button" data-testid="try-demo" onClick={() => void start()}>Open seeded workspace</button>
+            <button className="text-link" onClick={() => void copyPrompt()}>Copy agent prompt</button>
           </div>
-          <p className="hero-note">No signup. No API key. A complete seeded workspace in one click.</p>
+          <p className="hero-note">No signup. No API key. Compare, decide, approve, and undo in about 90 seconds.</p>
         </div>
         <div className="hero-graph" aria-label="Illustration of a live project dependency graph">
           <div className="hero-node node-a"><span>Architecture</span><b>Complete</b></div>

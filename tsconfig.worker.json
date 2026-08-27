@@ -8,7 +8,7 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["./worker-configuration.d.ts"]
+    "types": ["./worker-configuration.d.ts", "vitest/globals"]
   },
-  "include": ["worker", "src/domain/types.ts", "src/domain/schemas.ts", "src/engine"]
+  "include": ["worker", "src/domain/types.ts", "src/domain/schemas.ts", "src/engine", "tests/worker.test.ts"]
 }

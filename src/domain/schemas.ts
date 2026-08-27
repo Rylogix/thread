@@ -8,6 +8,7 @@ export const taskKindSchema = z.enum(["task", "milestone"]);
 const uuid = z.string().uuid();
 const timestamp = z.string().datetime({ offset: true });
 const finiteNonNegative = z.number().finite().nonnegative();
+const preferenceSchema = z.enum(["balanced", "safety", "speed", "impact", "cost"]);
 
 export const workspaceSchema = z.object({
   id: uuid,
@@ -107,6 +108,23 @@ export const scenarioSchema = z.object({
   createdAt: timestamp,
 });
 
+export const decisionLedgerEvidenceSchema = z.object({
+  action: z.string().min(1).max(120),
+  reason: z.string().min(1).max(1_000),
+  beforeSummary: z.string().max(500).optional(),
+  afterSummary: z.string().max(500).optional(),
+  proposalId: uuid.optional(),
+  decisionId: uuid.optional(),
+  simulation: z.object({
+    beforeProbability: z.number().min(0).max(100).optional(),
+    afterProbability: z.number().min(0).max(100).optional(),
+    seed: z.number().int(),
+    iterations: z.number().int().min(1).max(5_000),
+  }).optional(),
+  result: z.enum(["success", "rejected", "error", "rolled-back"]),
+  rollbackAvailable: z.boolean(),
+});
+
 export const activityEventSchema = z.object({
   id: uuid,
   workspaceId: uuid,
@@ -114,6 +132,7 @@ export const activityEventSchema = z.object({
   type: z.string().min(1).max(80),
   message: z.string().min(1).max(500),
   payload: z.record(z.string(), z.unknown()),
+  evidence: decisionLedgerEvidenceSchema.optional(),
   createdAt: timestamp,
 });
 
@@ -131,8 +150,146 @@ export const simulationResultSchema = z.object({
   calculatedAt: timestamp,
 });
 
+export const decisionPolicySchema = z.object({
+  negotiationActive: z.boolean(),
+  deadlineLocked: z.boolean(),
+  budgetLocked: z.boolean(),
+  minimumProbabilityLocked: z.boolean(),
+  minimumProbability: z.number().min(0).max(99.9),
+  capacityLocked: z.boolean(),
+  preservedTaskIds: z.array(uuid).max(500),
+  maximumRiskLocked: z.boolean(),
+  maximumRisk: z.number().min(0).max(1),
+  preference: preferenceSchema,
+  updatedAt: timestamp,
+});
+
+const planOperationTypeSchema = z.enum(["create_task", "update_task", "create_dependency", "complete_task", "resolve_risk", "update_risk", "delete_task", "delete_dependency", "update_workspace"]);
+
+export const proposalOperationSchema = z.object({
+  id: uuid,
+  type: planOperationTypeSchema,
+  input: z.record(z.string(), z.unknown()),
+  reason: z.string().trim().min(1).max(1_000),
+});
+
+const criticalPathSummarySchema = z.object({
+  taskIds: z.array(uuid),
+  taskTitles: z.array(z.string()),
+  totalDuration: finiteNonNegative,
+});
+
+const proposalEvidenceSchema = z.object({
+  criticalPath: criticalPathSummarySchema,
+  simulation: simulationResultSchema,
+  remainingCost: finiteNonNegative,
+  unresolvedRiskScore: finiteNonNegative,
+  taskCount: z.number().int().nonnegative(),
+});
+
+const proposalConstraintCheckSchema = z.object({
+  key: z.enum(["deadline", "budget", "minimum-probability", "capacity", "preserved-scope", "maximum-risk"]),
+  label: z.string().min(1).max(100),
+  passed: z.boolean(),
+  actual: z.string().max(200),
+  required: z.string().max(200),
+  explanation: z.string().max(500),
+});
+
+const proposalDiffSchema = z.object({
+  addedTasks: z.array(z.object({ taskId: uuid, title: z.string() })),
+  removedTasks: z.array(z.object({ taskId: uuid, title: z.string() })),
+  modifiedTasks: z.array(z.object({
+    taskId: uuid,
+    title: z.string(),
+    changes: z.array(z.object({
+      field: z.enum(["title", "estimatedHours", "minimumHours", "maximumHours", "confidence", "priority", "status", "cost"]),
+      before: z.union([z.string(), z.number()]),
+      after: z.union([z.string(), z.number()]),
+    })),
+  })),
+  addedDependencies: z.array(z.object({ dependencyId: uuid, fromTitle: z.string(), toTitle: z.string() })),
+  removedDependencies: z.array(z.object({ dependencyId: uuid, fromTitle: z.string(), toTitle: z.string() })),
+  changedRisks: z.array(z.object({ riskId: uuid, title: z.string(), beforeProbability: z.number(), afterProbability: z.number(), resolved: z.boolean() })),
+});
+
+export const planProposalSchema = z.object({
+  id: uuid,
+  workspaceId: uuid,
+  name: z.string().trim().min(1).max(100),
+  mode: z.enum(["safest", "fastest", "highest-impact"]),
+  status: z.enum(["ready", "awaiting-decision", "rejected", "applied", "rolled-back"]),
+  revision: z.number().int().min(1).max(100),
+  rationale: z.string().min(1).max(2_000),
+  operations: z.array(proposalOperationSchema).min(1).max(50),
+  proposedPlan: planSnapshotSchema,
+  before: proposalEvidenceSchema,
+  after: proposalEvidenceSchema,
+  diff: proposalDiffSchema,
+  constraintChecks: z.array(proposalConstraintCheckSchema),
+  expectedUpside: z.array(z.string().max(500)).max(12),
+  tradeoffs: z.array(z.string().max(500)).max(12),
+  basePlanRevision: z.number().int().positive(),
+  simulationSeed: z.number().int(),
+  simulationIterations: z.number().int().min(50).max(5_000),
+  idempotencyKey: z.string().max(120).optional(),
+  requestFingerprint: z.string().max(2_000).optional(),
+  createdBy: actorSchema,
+  createdAt: timestamp,
+  updatedAt: timestamp,
+});
+
+export const humanDecisionSchema = z.object({
+  id: uuid,
+  workspaceId: uuid,
+  question: z.string().trim().min(1).max(500),
+  context: z.string().max(1_000),
+  proposalIds: z.array(uuid).min(2).max(4),
+  options: z.array(z.object({
+    id: uuid,
+    proposalId: uuid,
+    label: z.string().min(1).max(100),
+    summary: z.string().max(500),
+    predictedProbability: z.number().min(0).max(100),
+    predictedP80: finiteNonNegative,
+    predictedCostMaximum: finiteNonNegative,
+    scopeDelta: z.number().int(),
+  })).min(2).max(4),
+  status: z.enum(["open", "answered"]),
+  selectedOptionId: uuid.nullable(),
+  customResponse: z.string().max(1_000).nullable(),
+  idempotencyKey: z.string().max(120).optional(),
+  requestFingerprint: z.string().max(2_000).optional(),
+  requestedAt: timestamp,
+  answeredAt: timestamp.nullable(),
+});
+
+export const proposalApplicationSchema = z.object({
+  proposalId: uuid,
+  previousPlan: planSnapshotSchema,
+  previousPlanRevision: z.number().int().positive(),
+  appliedAt: timestamp,
+});
+
 export const workspaceStateSchema = planSnapshotSchema.extend({
   scenarios: z.array(scenarioSchema).max(100),
+  decisionPolicy: decisionPolicySchema.default({
+    negotiationActive: false,
+    deadlineLocked: false,
+    budgetLocked: false,
+    minimumProbabilityLocked: false,
+    minimumProbability: 90,
+    capacityLocked: false,
+    preservedTaskIds: [],
+    maximumRiskLocked: false,
+    maximumRisk: 0.4,
+    preference: "balanced",
+    updatedAt: "2026-08-27T13:00:00.000Z",
+  }),
+  planProposals: z.array(planProposalSchema).max(12).default([]),
+  humanDecisions: z.array(humanDecisionSchema).max(50).default([]),
+  lastProposalApplication: proposalApplicationSchema.nullable().default(null),
+  planRevision: z.number().int().positive().default(1),
   activity: z.array(activityEventSchema).max(1_000),
   lastSimulation: simulationResultSchema.nullable(),
   storageMode: z.enum(["remote", "local"]),

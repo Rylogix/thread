@@ -1,8 +1,8 @@
 import { z } from "zod";
-import type { WorkspaceService } from "../domain/workspaceService";
+import { ApplicationError, type WorkspaceService } from "../domain/workspaceService";
 import type { PlanOperation } from "../domain/types";
 
-export type ToolCategory = "read" | "create" | "modify" | "analysis" | "high-level" | "scenario";
+export type ToolCategory = "read" | "create" | "modify" | "analysis" | "high-level" | "scenario" | "negotiation";
 
 export interface ThreadToolDefinition extends WebMCPToolDefinition {
   category: ToolCategory;
@@ -21,6 +21,8 @@ const emptySchema = objectSchema({});
 const id = { type: "string", format: "uuid" } as const;
 const number = (minimum = 0, maximum = 10_000) => ({ type: "number", minimum, maximum });
 const text = (maxLength = 1_000) => ({ type: "string", minLength: 1, maxLength });
+const proposalMode = { type: "string", enum: ["safest", "fastest", "highest-impact"] } as const;
+const decisionPreference = { type: "string", enum: ["balanced", "safety", "speed", "impact", "cost"] } as const;
 const taskFields = {
   title: text(140),
   description: { type: "string", maxLength: 2_000 },
@@ -37,12 +39,12 @@ const taskFields = {
 
 export function buildThreadTools(service: WorkspaceService): ThreadToolDefinition[] {
   const readonly = (category: ToolCategory, name: string, title: string, description: string, inputSchema: Record<string, unknown>, execute: (input: Record<string, unknown>) => unknown | Promise<unknown>): ThreadToolDefinition => ({
-    name, title, description, inputSchema, category, annotations: { readOnlyHint: true, untrustedContentHint: false }, execute: wrap(execute),
+    name, title, description, inputSchema, category, annotations: { readOnlyHint: true, untrustedContentHint: false }, execute: wrap(execute, inputSchema),
   });
   const read = (name: string, title: string, description: string, inputSchema: Record<string, unknown>, execute: (input: Record<string, unknown>) => unknown | Promise<unknown>) => readonly("read", name, title, description, inputSchema, execute);
   const analyze = (name: string, title: string, description: string, inputSchema: Record<string, unknown>, execute: (input: Record<string, unknown>) => unknown | Promise<unknown>) => readonly("analysis", name, title, description, inputSchema, execute);
   const action = (category: ToolCategory, name: string, title: string, description: string, inputSchema: Record<string, unknown>, execute: (input: Record<string, unknown>) => unknown | Promise<unknown>): ThreadToolDefinition => ({
-    name, title, description, inputSchema, category, annotations: { readOnlyHint: false, untrustedContentHint: false }, execute: wrap(execute),
+    name, title, description, inputSchema, category, annotations: { readOnlyHint: false, untrustedContentHint: false }, execute: wrap(execute, inputSchema),
   });
   const agent = { actor: "agent" } as const;
 
@@ -66,6 +68,21 @@ export function buildThreadTools(service: WorkspaceService): ThreadToolDefinitio
     read("get_critical_path", "Get critical path", "Return the currently calculated longest dependency path and all CPM timings.", emptySchema, () => service.getCriticalPath()),
     read("get_simulation_summary", "Get simulation summary", "Return the last visible simulation result, or null when the plan changed since it ran.", emptySchema, () => service.getSimulationSummary()),
     read("get_activity", "Get activity", "Return recent human, agent, system, and persistence activity in reverse chronological order.", objectSchema({ limit: { type: "integer", minimum: 1, maximum: 200 } }), (input) => service.getActivity(typeof input.limit === "number" ? input.limit : 50)),
+
+    readonly("negotiation", "get_decision_context", "Get decision context", "Read the live-plan revision, human-locked contract, protected tasks, deterministic baseline evidence, and open-decision count before proposing changes.", emptySchema, () => service.getDecisionContext()),
+    action("negotiation", "create_plan_proposal", "Create plan proposal", "Create and persist one deterministic simulated proposal without mutating the live plan. Requires an active human-authored decision contract.", objectSchema({ mode: proposalMode, name: text(100), seed: { type: "integer", minimum: 1, maximum: 2_147_483_647 }, iterations: { type: "integer", minimum: 250, maximum: 5_000 }, idempotencyKey: text(120) }, ["mode"]), (input) => service.createPlanProposal(input, agent)),
+    readonly("negotiation", "get_plan_proposals", "Get plan proposals", "List proposal summaries, statuses, evidence deltas, and constraint results for the current Decision Room.", objectSchema({ status: { type: "string", enum: ["ready", "awaiting-decision", "rejected", "applied", "rolled-back"] } }), (input) => {
+      const proposals = service.getPlanProposals();
+      return typeof input.status === "string" ? proposals.filter((proposal) => proposal.status === input.status) : proposals;
+    }),
+    readonly("negotiation", "get_plan_proposal", "Get plan proposal", "Inspect one complete proposal including explicit operations, reasons, simulated evidence, graph diff, tradeoffs, and lock checks.", objectSchema({ proposalId: id }, ["proposalId"]), (input) => service.getPlanProposal(parseId(input, "proposalId"))),
+    readonly("negotiation", "compare_plan_proposals", "Compare plan proposals", "Compare two to four proposals generated from the same live revision with the same simulation seed and iteration count.", objectSchema({ proposalIds: { type: "array", minItems: 2, maxItems: 4, uniqueItems: true, items: id } }, ["proposalIds"]), (input) => service.comparePlanProposals(z.array(z.string().uuid()).min(2).max(4).parse(input.proposalIds))),
+    action("negotiation", "revise_plan_proposal", "Revise plan proposal", "Create a new simulated revision from human guidance while preserving the proposal identity and leaving live state untouched.", objectSchema({ proposalId: id, preserveTaskIds: { type: "array", maxItems: 500, uniqueItems: true, items: id }, preference: decisionPreference, customResponse: { type: "string", maxLength: 1_000 }, idempotencyKey: text(120) }, ["proposalId"]), (input) => service.revisePlanProposal(input, agent)),
+    action("negotiation", "request_human_decision", "Request human decision", "Ask one structured tradeoff question backed by calculated option effects. This cannot approve or mutate the live plan.", objectSchema({ question: text(500), context: { type: "string", maxLength: 1_000 }, proposalIds: { type: "array", minItems: 2, maxItems: 4, uniqueItems: true, items: id }, idempotencyKey: text(120) }, ["question", "proposalIds"]), (input) => service.requestHumanDecision({ context: "", ...input }, agent)),
+    readonly("negotiation", "get_human_decisions", "Get human decisions", "Read structured decision requests and human answers so the agent can continue negotiation without gaining approval authority.", objectSchema({ status: { type: "string", enum: ["open", "answered"] } }), (input) => {
+      const decisions = service.getHumanDecisions();
+      return typeof input.status === "string" ? decisions.filter((decision) => decision.status === input.status) : decisions;
+    }),
 
     action("create", "create_task", "Create task", "Create a validated task in the live graph and persist it. Reuse id or idempotencyKey for safe retries.", objectSchema({ id, ...taskFields, idempotencyKey: { type: "string", maxLength: 120 } }, ["title"]), (input) => {
       const { idempotencyKey, ...task } = input;
@@ -130,7 +147,7 @@ export async function registerThreadTools(service: WorkspaceService): Promise<Re
 
 export async function executeThreadTool(service: WorkspaceService, name: string, input: Record<string, unknown> = {}): Promise<WebMCPToolResult> {
   const tool = buildThreadTools(service).find((candidate) => candidate.name === name);
-  if (!tool) return { isError: true, content: [{ type: "text", text: `Unknown THREAD tool: ${name}` }] };
+  if (!tool) return { isError: true, content: [{ type: "text", text: `Unknown THREAD tool: ${name}` }], structuredContent: { error: { code: "not-found", message: `Unknown THREAD tool: ${name}` } } };
   try {
     return await tool.execute(input);
   } catch (error) {
@@ -138,11 +155,29 @@ export async function executeThreadTool(service: WorkspaceService, name: string,
   }
 }
 
-function wrap(execute: (input: Record<string, unknown>) => unknown | Promise<unknown>): (input: Record<string, unknown>) => Promise<WebMCPToolResult> {
+function wrap(execute: (input: Record<string, unknown>) => unknown | Promise<unknown>, inputSchema: Record<string, unknown>): (input: Record<string, unknown>) => Promise<WebMCPToolResult> {
   return async (input) => {
-    const result = await execute(input ?? {});
-    return { content: [{ type: "text", text: compact(result) }], structuredContent: result };
+    try {
+      const normalized = input ?? {};
+      validateTopLevelInput(normalized, inputSchema);
+      const result = await execute(normalized);
+      return { content: [{ type: "text", text: compact(result) }], structuredContent: result };
+    } catch (error) {
+      const code = error instanceof ApplicationError ? error.code : error instanceof z.ZodError ? "validation" : "unexpected";
+      const message = error instanceof Error ? error.message : String(error);
+      return { isError: true, content: [{ type: "text", text: message }], structuredContent: { error: { code, message } } };
+    }
   };
+}
+
+function validateTopLevelInput(input: Record<string, unknown>, schema: Record<string, unknown>): void {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new ApplicationError("Tool input must be an object", "validation");
+  const properties = schema.properties && typeof schema.properties === "object" ? schema.properties as Record<string, unknown> : {};
+  const unexpected = Object.keys(input).filter((key) => !(key in properties));
+  if (unexpected.length) throw new ApplicationError(`Unexpected input properties: ${unexpected.join(", ")}`, "validation");
+  const required = Array.isArray(schema.required) ? schema.required.filter((key): key is string => typeof key === "string") : [];
+  const missing = required.filter((key) => !(key in input));
+  if (missing.length) throw new ApplicationError(`Missing required input properties: ${missing.join(", ")}`, "validation");
 }
 
 function compact(value: unknown): string {
@@ -162,4 +197,4 @@ function parseOperations(value: unknown): PlanOperation[] {
   return z.array(z.object({ type: z.enum(["create_task", "update_task", "create_dependency", "complete_task", "resolve_risk", "update_workspace"]), input: z.record(z.string(), z.unknown()) }).strict()).min(1).max(25).parse(value);
 }
 
-export const THREAD_TOOL_COUNT = 38;
+export const THREAD_TOOL_COUNT = 46;

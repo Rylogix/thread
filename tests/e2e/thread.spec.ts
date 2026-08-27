@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { createDemoWorkspace } from "../../src/domain/seed";
 
 test("judge flow: seed, edit, graph, persistence, simulation, scenarios, reset, and debugger", async ({ page }) => {
+  test.setTimeout(90_000);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: /Turn chaos into a plan/i })).toBeVisible();
   await page.getByTestId("try-demo").click();
@@ -50,9 +51,9 @@ test("judge flow: seed, edit, graph, persistence, simulation, scenarios, reset, 
   await expect(page.getByText("Judge edited task", { exact: true })).toHaveCount(0);
 
   await page.goto("/debug/webmcp");
-  await expect(page.getByTestId("tool-count")).toHaveText("38");
+  await expect(page.getByTestId("tool-count")).toHaveText("46");
   await page.getByTestId("debug-full-test").click();
-  await expect(page.getByText("malformed input rejected", { exact: true })).toBeVisible();
+  await expect(page.getByText("malformed input rejected", { exact: true })).toBeVisible({ timeout: 60_000 });
   await expect(page.locator(".test-fail")).toHaveCount(0);
 });
 

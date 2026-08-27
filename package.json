@@ -1,6 +1,7 @@
 {
   "name": "thread-webmcp",
   "version": "1.0.0",
+  "packageManager": "pnpm@11.19.0",
   "private": true,
   "type": "module",
   "description": "THREAD - an agent-native execution graph for humans and AI.",
@@ -8,12 +9,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "lint": "oxlint src worker tests --deny-warnings",
     "preview": "vite preview",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "test:all": "pnpm typecheck && pnpm test && pnpm build && pnpm test:e2e",
+    "test:all": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:e2e",
     "cf:types": "wrangler types worker-configuration.d.ts",
     "cf:dev": "wrangler dev",
     "cf:dry-run": "pnpm build && wrangler deploy --dry-run",
@@ -29,7 +31,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260826.1",
+    "@cloudflare/workers-types": "^5.20260827.1",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/jest-dom": "^7.0.1",
@@ -41,10 +43,11 @@
     "@vitejs/plugin-react": "^6.1.0",
     "@vitest/coverage-v8": "^4.1.11",
     "jsdom": "^30.0.1",
+    "oxlint": "^1.80.0",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
     "vitest": "^4.1.11",
-    "wrangler": "^4.126.0"
+    "wrangler": "^4.127.0"
   }
 }

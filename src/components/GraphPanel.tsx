@@ -4,7 +4,6 @@ import {
   Controls,
   MiniMap,
   ReactFlow,
-  addEdge,
   applyNodeChanges,
   type Connection,
   type Edge,
@@ -14,7 +13,6 @@ import "@xyflow/react/dist/style.css";
 import { CirclePlus, LocateFixed, Route } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useThread } from "../app/ThreadProvider";
-import type { Task } from "../domain/types";
 import { TaskNode, type TaskFlowNode } from "./TaskNode";
 
 interface GraphPanelProps {
@@ -33,6 +31,7 @@ export function GraphPanel({ selectedTaskId, onSelectTask, showCritical, onToggl
   const [error, setError] = useState<string | null>(null);
   const critical = useMemo(() => service.getCriticalPath(), [service, state?.workspace.updatedAt]);
   const criticalIds = useMemo(() => new Set(critical.taskIds), [critical]);
+  const lockedIds = useMemo(() => new Set(state?.decisionPolicy.preservedTaskIds ?? []), [state?.decisionPolicy.preservedTaskIds]);
   const status = service.getAgentStatus();
 
   useEffect(() => {
@@ -41,10 +40,10 @@ export function GraphPanel({ selectedTaskId, onSelectTask, showCritical, onToggl
       id: task.id,
       type: "task",
       position: { x: task.x, y: task.y },
-      data: { task, critical: showCritical && criticalIds.has(task.id), highlighted: status.highlightedTaskId === task.id },
+      data: { task, critical: showCritical && criticalIds.has(task.id), highlighted: status.highlightedTaskId === task.id, locked: lockedIds.has(task.id) },
       selected: selectedTaskId === task.id,
     })));
-  }, [state, showCritical, selectedTaskId, status.highlightedTaskId, criticalIds]);
+  }, [state, showCritical, selectedTaskId, status.highlightedTaskId, criticalIds, lockedIds]);
 
   const edges = useMemo<Edge[]>(() => state?.dependencies.map((dependency) => ({
     id: dependency.id,
