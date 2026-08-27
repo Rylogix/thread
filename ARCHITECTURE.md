@@ -86,9 +86,9 @@ Meaningful UI and tool actions record the actor and actor type, action, timestam
 
 ## Worker and security
 
-The module Worker uses generated `Env` binding types. `/api/health` and one workspace resource are the only public API routes; there is no workspace-list endpoint. Requests are body-capped at 1 MiB, parsed with Zod, stored with bound D1 statements, and returned through consistent JSON errors.
+The module Worker uses generated `Env` binding types. `/api/health` and one workspace resource are the only public API routes; there is no workspace-list or public delete endpoint. Random anonymous workspace UUIDs are unlisted capability identifiers. Requests are rate-limited per Cloudflare location and client address, cross-site browser mutations are rejected, bodies are capped at 1 MiB, input is parsed with Zod, storage uses bound D1 statements, workspace IDs are redacted from logs, and errors use consistent non-sensitive JSON.
 
-The Worker adds CSP, anti-framing, MIME sniffing, referrer, opener, and permissions headers to API and static assets. No secrets or personal profile data are stored.
+The Worker adds CSP, HSTS, anti-framing, MIME sniffing, referrer, opener, resource, and permissions headers to API and static assets. JSON responses are not cached and production source maps are disabled. No secrets or personal profile data are stored.
 
 The approval boundary adds domain protections beyond HTTP hardening:
 

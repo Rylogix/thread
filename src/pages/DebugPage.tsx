@@ -1,4 +1,4 @@
-import { AlertCircle, ArrowLeft, Bot, CheckCircle2, FlaskConical, Play, RefreshCw, RotateCcw } from "lucide-react";
+import { AlertCircle, ArrowLeft, Bot, CheckCircle2, FlaskConical, GitFork, Play, RefreshCw, RotateCcw } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useThread } from "../app/ThreadProvider";
 import { buildThreadTools, executeThreadTool, THREAD_TOOL_COUNT, type ThreadToolDefinition } from "../webmcp/registerTools";
@@ -99,7 +99,7 @@ export function DebugPage() {
   const grouped = tools.reduce<Record<string, ThreadToolDefinition[]>>((groups, tool) => { (groups[tool.category] ??= []).push(tool); return groups; }, {});
   return (
     <main className="debug-shell">
-      <header className="debug-nav"><a className="brand" href="/"><img src="/thread-mark.svg" alt="" /><span>THREAD</span></a><a className="text-link" href="/"><ArrowLeft size={15} /> Back to workspace</a></header>
+      <header className="debug-nav"><a className="brand" href="/"><img src="/thread-mark.svg" alt="" /><span>THREAD</span></a><div className="nav-links"><a className="text-link" href="/repo"><GitFork size={15} /> Source</a><a className="text-link" href="/"><ArrowLeft size={15} /> Back to workspace</a></div></header>
       <section className="debug-hero"><div><p className="eyebrow">WEBMCP TEST CONSOLE</p><h1>The agent surface,<br />made inspectable.</h1><p>Verify discovery, strict schemas, real state operations, malformed-input handling, and the no-support fallback.</p></div><div className={`support-card ${supported ? "supported" : "unsupported"}`}><span>{supported ? <CheckCircle2 /> : <AlertCircle />}</span><div><small>WEBMCP</small><strong>{supported ? "Supported" : "Not available"}</strong><p>{supported ? `${registration?.registered.length ?? 0} native tools registered` : "Manual planning works. Open in ChatGPT desktop or a WebMCP-enabled browser for agent tools."}</p></div></div></section>
       <section className="debug-summary"><div><span>PLANNED TOOLS</span><strong data-testid="tool-count">{THREAD_TOOL_COUNT}</strong></div><div><span>NATIVE DISCOVERED</span><strong>{registration?.nativeTools.length ?? 0}</strong></div><div><span>REGISTRATION ERRORS</span><strong>{registration?.errors.length ?? 0}</strong></div><div><span>WORKSPACE</span><strong>{state ? "Ready" : "Not loaded"}</strong></div></section>
       <section className="debug-controls"><button disabled={running} onClick={() => void run("read")}><FlaskConical /> Test Read Tools</button><button disabled={running} onClick={() => void run("mutation")}><Bot /> Test Mutation Tools</button><button className="primary-button" data-testid="debug-full-test" disabled={running} onClick={() => void run("full")}><Play /> Run Full Test</button><button disabled={running} onClick={() => void service.resetDemo({ actor: "human" }).then(() => setResults([]))}><RotateCcw /> Reset Demo</button></section>

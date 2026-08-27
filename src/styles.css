@@ -51,6 +51,7 @@ button:disabled { cursor: wait; opacity: .55; }
 
 .hero-shell { min-height: 100vh; padding: 0 clamp(24px, 7vw, 110px) 56px; overflow: hidden; background-image: linear-gradient(rgba(28, 62, 70, .16) 1px, transparent 1px), linear-gradient(90deg, rgba(28, 62, 70, .16) 1px, transparent 1px); background-size: 46px 46px; }
 .hero-nav { height: 92px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line-soft); }
+.nav-links { display: flex; align-items: center; gap: 8px; }
 .hero-copy { min-height: 620px; display: grid; grid-template-columns: minmax(420px, .9fr) minmax(520px, 1.1fr); align-items: center; gap: 6vw; max-width: 1460px; margin: 0 auto; }
 .hero-copy h1 { font-size: clamp(54px, 6.4vw, 104px); line-height: .94; letter-spacing: -.055em; margin: 18px 0 28px; max-width: 970px; }
 .hero-lede { color: #a7babb; max-width: 660px; font-size: clamp(17px, 1.5vw, 22px); line-height: 1.65; }

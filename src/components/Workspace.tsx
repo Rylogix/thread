@@ -1,4 +1,4 @@
-import { Braces, ChevronDown, Copy, GitCompareArrows, PanelLeft, PanelRight, PlayCircle, RefreshCw, Route, Sparkles } from "lucide-react";
+import { Braces, ChevronDown, Copy, GitCompareArrows, GitFork, PanelLeft, PanelRight, PlayCircle, RefreshCw, Route, Sparkles } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import { useThread } from "../app/ThreadProvider";
 import { DEMO_PROMPT } from "../domain/seed";
@@ -52,6 +52,7 @@ export function Workspace() {
           <button className="icon-text-button" onClick={() => setScenariosOpen(true)}><GitCompareArrows size={15} /> What If?</button>
           <button className="icon-text-button desktop-action" onClick={() => void navigator.clipboard.writeText(DEMO_PROMPT)}><Copy size={15} /> Prompt</button>
           <button className="icon-text-button" data-testid="run-simulation" disabled={simulating} onClick={() => void runSimulation()}><PlayCircle size={15} /> {simulating ? "Running..." : "Simulate"}</button>
+          <a className="icon-button desktop-action" href="/repo" aria-label="Open source repository"><GitFork size={17} /></a>
           <a className="icon-button desktop-action" href="/debug/webmcp" aria-label="Open WebMCP debugger"><Braces size={17} /></a>
           <button className="icon-button" onClick={() => void reset()} aria-label="Reset demo"><RefreshCw size={17} /></button>
         </div>

@@ -48,6 +48,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const startedAt = Date.now();
     const url = new URL(request.url);
+    const path = pathForLogs(url.pathname);
     let response: Response;
     try {
       response = url.pathname.startsWith("/api/") ? await handleApi(request, env, url) : await env.ASSETS.fetch(request);
@@ -57,30 +58,41 @@ export default {
         return withSecurityHeaders(response);
       }
       const message = error instanceof Error ? error.message : "Unknown error";
-      console.error(JSON.stringify({ message: "request failed", method: request.method, path: url.pathname, error: message }));
+      console.error(JSON.stringify({ message: "request failed", method: request.method, path, error: message }));
       response = jsonError("internal_error", "The request could not be completed", 500);
     }
     response = withSecurityHeaders(response);
-    console.log(JSON.stringify({ message: "request complete", method: request.method, path: url.pathname, status: response.status, durationMs: Date.now() - startedAt }));
+    console.log(JSON.stringify({ message: "request complete", method: request.method, path, status: response.status, durationMs: Date.now() - startedAt }));
     return response;
   },
 } satisfies ExportedHandler<Env>;
 
 async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
-  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { Allow: "GET, PUT, DELETE, OPTIONS" } });
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { Allow: "GET, PUT, OPTIONS" } });
   if (url.pathname === "/api/health" && request.method === "GET") {
     const database = await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
     return Response.json({ ok: database?.ok === 1, service: "thread-webmcp", environment: env.APP_ENV });
   }
   const match = url.pathname.match(/^\/api\/workspaces\/([^/]+)$/);
   if (!match) return jsonError("not_found", "API route not found", 404);
-  const workspaceId = decodeURIComponent(match[1] ?? "");
+  let workspaceId: string;
+  try { workspaceId = decodeURIComponent(match[1] ?? ""); }
+  catch { return jsonError("invalid_workspace_id", "Workspace ID must be a UUID", 400); }
   if (!UUID_PATTERN.test(workspaceId)) return jsonError("invalid_workspace_id", "Workspace ID must be a UUID", 400);
+  const rateLimitKey = `${request.headers.get("CF-Connecting-IP") ?? "local"}:${request.method}`;
+  const rateLimit = await env.API_RATE_LIMITER.limit({ key: rateLimitKey });
+  if (!rateLimit.success) {
+    const response = jsonError("rate_limit_exceeded", "Too many workspace requests", 429);
+    response.headers.set("Retry-After", "60");
+    return response;
+  }
   if (request.method === "GET") {
     const state = await loadWorkspace(env.DB, workspaceId);
     return state ? Response.json(state) : jsonError("workspace_not_found", "Workspace not found", 404);
   }
   if (request.method === "PUT") {
+    if (isCrossSiteMutation(request, url)) return jsonError("cross_site_request", "Cross-site workspace mutations are not allowed", 403);
+    if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return jsonError("unsupported_media_type", "Content-Type must be application/json", 415);
     const length = Number(request.headers.get("content-length") ?? 0);
     if (length > MAX_BODY_BYTES) return jsonError("body_too_large", "Request body exceeds 1 MiB", 413);
     const body = await readBoundedJson(request);
@@ -92,11 +104,15 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     await saveWorkspace(env.DB, parsed.data);
     return Response.json({ ok: true, workspaceId, updatedAt: parsed.data.workspace.updatedAt, planRevision: parsed.data.planRevision });
   }
-  if (request.method === "DELETE") {
-    await env.DB.prepare("DELETE FROM workspaces WHERE id = ?").bind(workspaceId).run();
-    return new Response(null, { status: 204 });
-  }
-  return jsonError("method_not_allowed", "Method not allowed", 405);
+  const response = jsonError("method_not_allowed", "Method not allowed", 405);
+  response.headers.set("Allow", "GET, PUT, OPTIONS");
+  return response;
+}
+
+export function isCrossSiteMutation(request: Request, url: URL): boolean {
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== url.origin) return true;
+  return request.headers.get("Sec-Fetch-Site")?.toLowerCase() === "cross-site";
 }
 
 async function readBoundedJson(request: Request): Promise<unknown> {
@@ -285,8 +301,15 @@ function withSecurityHeaders(response: Response): Response {
   secured.headers.set("X-Content-Type-Options", "nosniff");
   secured.headers.set("X-Frame-Options", "DENY");
   secured.headers.set("Cross-Origin-Opener-Policy", "same-origin");
+  secured.headers.set("Cross-Origin-Resource-Policy", "same-origin");
+  secured.headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
   secured.headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+  if (secured.headers.get("Content-Type")?.includes("application/json")) secured.headers.set("Cache-Control", "no-store");
   return secured;
+}
+
+export function pathForLogs(pathname: string): string {
+  return /^\/api\/workspaces\/[^/]+$/.test(pathname) ? "/api/workspaces/:id" : pathname;
 }
 
 function jsonError(code: string, message: string, status: number, details?: unknown): Response {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createDemoWorkspace } from "../src/domain/seed";
-import { validateWorkspaceIntegrity } from "../worker/index";
+import { isCrossSiteMutation, pathForLogs, validateWorkspaceIntegrity } from "../worker/index";
 
 const workspaceId = "70000000-0000-4000-8000-000000000007";
 
@@ -25,5 +25,17 @@ describe("Worker workspace integrity boundary", () => {
     const issues = validateWorkspaceIntegrity(state);
     expect(issues.some((issue) => issue.message.toLowerCase().includes("cycle"))).toBe(true);
     expect(issues.some((issue) => issue.message.includes("unknown proposal"))).toBe(true);
+  });
+
+  it("rejects cross-site browser mutations without blocking same-origin or non-browser clients", () => {
+    const url = new URL("https://thread.rylogix.com/api/workspaces/70000000-0000-4000-8000-000000000007");
+    expect(isCrossSiteMutation(new Request(url, { method: "PUT", headers: { Origin: "https://example.test" } }), url)).toBe(true);
+    expect(isCrossSiteMutation(new Request(url, { method: "PUT", headers: { Origin: url.origin, "Sec-Fetch-Site": "same-origin" } }), url)).toBe(false);
+    expect(isCrossSiteMutation(new Request(url, { method: "PUT" }), url)).toBe(false);
+  });
+
+  it("redacts anonymous workspace identifiers from application logs", () => {
+    expect(pathForLogs(`/api/workspaces/${workspaceId}`)).toBe("/api/workspaces/:id");
+    expect(pathForLogs("/api/health")).toBe("/api/health");
   });
 });

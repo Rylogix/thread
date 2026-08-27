@@ -6,6 +6,7 @@ THREAD turns project planning into a negotiated, executable contract between a h
 
 - **Production domain:** [https://thread.rylogix.com](https://thread.rylogix.com)
 - **WebMCP debugger:** [https://thread.rylogix.com/debug/webmcp](https://thread.rylogix.com/debug/webmcp)
+- **Source redirect:** `/repo` is reserved for the approved public repository URL.
 
 ## Why THREAD
 
@@ -67,10 +68,10 @@ No Next.js, external AI API, login, judge-owned key, or separate backend server.
 
 ## Local setup
 
-Requirements: Node.js 22+ and pnpm 11+.
+Requirements: Node.js 24 and pnpm 11.19.0.
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 pnpm cf:types
 pnpm dev
 ```
@@ -94,6 +95,7 @@ pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
+pnpm exec playwright install chromium
 pnpm test:e2e
 pnpm cf:dry-run
 ```
@@ -123,6 +125,10 @@ curl -i https://thread.rylogix.com/debug/webmcp
 ```
 
 Do not commit `.dev.vars`, tokens, or secrets. The D1 database ID in `wrangler.jsonc` is a non-secret binding identifier.
+
+Fork deployment and post-deploy verification are documented in [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md). Security reports must follow [SECURITY.md](./SECURITY.md).
+
+The public API has no workspace-list or delete route. Anonymous random workspace UUIDs are unlisted capability identifiers; workspace requests are rate-limited, cross-site browser writes are rejected, payloads are capped and schema-validated, workspace IDs are redacted from Worker logs, JSON responses are not cached, and production source maps are disabled.
 
 ## Judge demo
 

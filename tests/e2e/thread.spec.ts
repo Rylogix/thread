@@ -75,7 +75,7 @@ test("local fallback remains editable and persistent when the API is offline", a
 
 test("production API persists an isolated D1 workspace round trip", async ({ request }) => {
   test.skip(!process.env.PLAYWRIGHT_BASE_URL, "Runs only against an explicitly selected deployment.");
-  const workspace = createDemoWorkspace(crypto.randomUUID());
+  const workspace = createDemoWorkspace("70000000-0000-4000-8000-000000000070");
   workspace.workspace.name = "Production persistence smoke test";
 
   const workspaceId = workspace.workspace.id;
@@ -91,6 +91,5 @@ test("production API persists an isolated D1 workspace round trip", async ({ req
   expect(saved.storageMode).toBe("remote");
 
   const remove = await request.delete(`/api/workspaces/${workspaceId}`);
-  expect(remove.ok()).toBeTruthy();
-  expect((await request.get(`/api/workspaces/${workspaceId}`)).status()).toBe(404);
+  expect(remove.status()).toBe(405);
 });

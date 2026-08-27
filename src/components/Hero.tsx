@@ -1,4 +1,4 @@
-import { ArrowRight, Braces, GitBranch, Gauge, ShieldCheck } from "lucide-react";
+import { ArrowRight, Braces, GitBranch, GitFork, Gauge, ShieldCheck } from "lucide-react";
 import { DEMO_PROMPT } from "../domain/seed";
 import { useThread } from "../app/ThreadProvider";
 
@@ -13,7 +13,7 @@ export function Hero() {
     <main className="hero-shell">
       <header className="hero-nav">
         <a className="brand" href="/" aria-label="THREAD home"><img src="/thread-mark.svg" alt="" /><span>THREAD</span></a>
-        <a className="text-link" href="/debug/webmcp"><Braces size={16} /> WebMCP debugger</a>
+        <div className="nav-links"><a className="text-link" href="/repo"><GitFork size={16} /> Source</a><a className="text-link" href="/debug/webmcp"><Braces size={16} /> WebMCP debugger</a></div>
       </header>
       <section className="hero-copy">
         <div>

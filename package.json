@@ -2,6 +2,9 @@
   "name": "thread-webmcp",
   "version": "1.0.0",
   "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=22.12 <25"
+  },
   "private": true,
   "type": "module",
   "description": "THREAD - an agent-native execution graph for humans and AI.",

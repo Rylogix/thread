@@ -4,7 +4,6 @@ import type { SaveResult, WorkspaceState } from "../domain/types";
 export interface WorkspaceRepository {
   load(workspaceId: string): Promise<WorkspaceState | null>;
   save(state: WorkspaceState): Promise<SaveResult>;
-  clear(workspaceId: string): Promise<void>;
 }
 
 export const ANONYMOUS_WORKSPACE_KEY = "thread.anonymousWorkspaceId";
@@ -56,15 +55,6 @@ export class BrowserWorkspaceRepository implements WorkspaceRepository {
     const remoteState = { ...state, storageMode: "remote" as const };
     this.saveLocal(remoteState);
     return { mode: "remote" };
-  }
-
-  async clear(workspaceId: string): Promise<void> {
-    this.storage.removeItem(this.key(workspaceId));
-    try {
-      await this.fetcher(`/api/workspaces/${workspaceId}`, { method: "DELETE" });
-    } catch {
-      // Local reset remains authoritative until the next successful save.
-    }
   }
 
   private loadLocal(workspaceId: string): WorkspaceState | null {
@@ -119,7 +109,4 @@ export class MemoryWorkspaceRepository implements WorkspaceRepository {
     return this.failRemote ? { mode: "local", warning: "Simulated D1 failure" } : { mode: "remote" };
   }
 
-  async clear(workspaceId: string): Promise<void> {
-    if (this.state?.workspace.id === workspaceId) this.state = null;
-  }
 }
