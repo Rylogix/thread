@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.wrangler/
+playwright-report/
+test-results/
+coverage/
+.env
+.env.*
+.dev.vars
+tmp/
+*.log
+worker-configuration.d.ts
+*.cpuprofile
+!.env.example
