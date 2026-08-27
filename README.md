@@ -68,12 +68,13 @@ No Next.js, external AI API, login, judge-owned key, or separate backend server.
 
 ## Local setup
 
-Requirements: Node.js 24 and pnpm 11.19.0.
+Requirements: Node.js 24 and pnpm 11.19.0. `packageManager` pins the pnpm release; run `corepack install` after cloning, and use `corepack pnpm` if another pnpm version is already on your path.
 
 ```bash
-pnpm install --frozen-lockfile
-pnpm cf:types
-pnpm dev
+corepack install
+corepack pnpm install --frozen-lockfile
+corepack pnpm cf:types
+corepack pnpm dev
 ```
 
 Open `http://localhost:5173`. Vite intentionally exercises the browser-local fallback because the Worker API is not running.

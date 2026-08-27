@@ -7,10 +7,11 @@ Requirements: Node.js 24 and pnpm 11.19.0.
 ```bash
 git clone <public-repository-url>
 cd thread
-pnpm install --frozen-lockfile
-pnpm cf:types
-pnpm exec playwright install --with-deps chromium
-pnpm test:all
+corepack install
+corepack pnpm install --frozen-lockfile
+corepack pnpm cf:types
+corepack pnpm exec playwright install --with-deps chromium
+corepack pnpm test:all
 ```
 
 For the Vite-only browser experience, run `pnpm dev` and open `http://localhost:5173`. This mode deliberately uses browser-local persistence.
