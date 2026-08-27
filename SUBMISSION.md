@@ -110,13 +110,13 @@ Judges are not required to test the app; the description, images, video, and rep
 
 Do not check an item until it has been verified against the final submission commit and deployment.
 
-Local verification on August 27, 2026: the complete gate passed 36 unit/integration tests and four local browser journeys. Reverify the production-only D1 journey after the final deployment.
+Verification on August 27, 2026: the complete gate passed 36 unit/integration tests and four local browser journeys. After the final production deployment, all three production browser journeys passed, including the isolated D1 create/read round trip and delete rejection.
 
 ### Compliance
 
 - [ ] Devpost registration and submission completed before September 3 at 1:00 p.m. PT
-- [ ] Public repository opens in a signed-out browser
-- [ ] MIT license is detected and visible in the repository About section
+- [x] Public repository opens in a signed-out browser
+- [x] MIT license is detected and visible in the repository About section
 - [x] README documents setup, architecture, tools, tests, and challenge-period work
 - [x] Repository history clearly dates challenge-period implementation
 - [x] All submission copy is in English
@@ -125,9 +125,9 @@ Local verification on August 27, 2026: the complete gate passed 36 unit/integrat
 ### Final product verification
 
 - [x] Final commit passes typecheck, unit/integration tests, production build, and browser tests
-- [ ] Production deployment is built from the final public commit
+- [x] Production deployment is built from the final public commit
 - [x] `https://thread.rylogix.com`, `/api/health`, and `/debug/webmcp` respond from a clean browser
-- [ ] Final D1 migrations are applied and an isolated create/read round trip plus delete rejection passes
+- [x] Final D1 migrations are applied and an isolated create/read round trip plus delete rejection passes
 - [x] WebMCP discovery reports exactly 46 intended tools with correct annotations
 - [x] Malformed proposal input and idempotent retries behave as documented
 - [x] UI and WebMCP proposal state remain synchronized after refresh
