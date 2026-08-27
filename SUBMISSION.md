@@ -54,7 +54,7 @@ This comparison is limited to the public descriptions visible in the [OpenAI Web
 
 - Production domain: <https://thread.rylogix.com>
 - WebMCP debugger: <https://thread.rylogix.com/debug/webmcp>
-- Source repository: **add the public GitHub, GitLab, or Bitbucket URL**
+- Source repository: <https://github.com/rylogix/thread>
 - Demo video: **add the public YouTube URL**
 
 ## Judging criteria mapping
@@ -110,12 +110,12 @@ Judges are not required to test the app; the description, images, video, and rep
 
 Do not check an item until it has been verified against the final submission commit and deployment.
 
-Verified August 27, 2026 against the final implementation: the complete local gate passed 33 unit/integration tests and four local browser journeys; all five production browser journeys passed, including the isolated D1 round trip.
+Local verification on August 27, 2026: the complete gate passed 36 unit/integration tests and four local browser journeys. Reverify the production-only D1 journey after the final deployment.
 
 ### Compliance
 
 - [ ] Devpost registration and submission completed before September 3 at 1:00 p.m. PT
-- [ ] Public repository URL added and opens in a signed-out browser
+- [ ] Public repository opens in a signed-out browser
 - [ ] MIT license is detected and visible in the repository About section
 - [x] README documents setup, architecture, tools, tests, and challenge-period work
 - [x] Repository history clearly dates challenge-period implementation
@@ -125,9 +125,9 @@ Verified August 27, 2026 against the final implementation: the complete local ga
 ### Final product verification
 
 - [x] Final commit passes typecheck, unit/integration tests, production build, and browser tests
-- [x] Production deployment is built from that final commit
+- [ ] Production deployment is built from the final public commit
 - [x] `https://thread.rylogix.com`, `/api/health`, and `/debug/webmcp` respond from a clean browser
-- [x] Final D1 migrations are applied and an isolated create/read/delete round trip passes
+- [ ] Final D1 migrations are applied and an isolated create/read round trip plus delete rejection passes
 - [x] WebMCP discovery reports exactly 46 intended tools with correct annotations
 - [x] Malformed proposal input and idempotent retries behave as documented
 - [x] UI and WebMCP proposal state remain synchronized after refresh

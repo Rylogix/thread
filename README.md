@@ -6,7 +6,7 @@ THREAD turns project planning into a negotiated, executable contract between a h
 
 - **Production domain:** [https://thread.rylogix.com](https://thread.rylogix.com)
 - **WebMCP debugger:** [https://thread.rylogix.com/debug/webmcp](https://thread.rylogix.com/debug/webmcp)
-- **Source redirect:** `/repo` is reserved for the approved public repository URL.
+- **Source:** [https://github.com/rylogix/thread](https://github.com/rylogix/thread) (also available through [https://thread.rylogix.com/repo](https://thread.rylogix.com/repo))
 
 ## Why THREAD
 

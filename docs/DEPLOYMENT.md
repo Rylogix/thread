@@ -5,7 +5,7 @@
 Requirements: Node.js 24 and pnpm 11.19.0.
 
 ```bash
-git clone <public-repository-url>
+git clone https://github.com/rylogix/thread.git
 cd thread
 corepack install
 corepack pnpm install --frozen-lockfile
@@ -49,6 +49,7 @@ The production configuration in this repository uses the canonical host `thread.
 ```bash
 curl --fail --show-error --include https://thread.rylogix.com/api/health
 curl --fail --show-error --include https://thread.rylogix.com/debug/webmcp
+curl --fail --show-error --head https://thread.rylogix.com/repo
 ```
 
 Confirm that JSON responses have `Cache-Control: no-store`, static and API responses have the documented security headers, production assets contain no `.map` files, and WebMCP discovery reports the intended 46 tools.

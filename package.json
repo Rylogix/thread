@@ -8,6 +8,11 @@
   "private": true,
   "type": "module",
   "description": "THREAD - an agent-native execution graph for humans and AI.",
+  "homepage": "https://thread.rylogix.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rylogix/thread.git"
+  },
   "license": "MIT",
   "scripts": {
     "dev": "vite",

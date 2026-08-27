@@ -25,6 +25,7 @@ import { validatePlanInvariants } from "../src/engine/invariants";
 
 const MAX_BODY_BYTES = 1_048_576;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const PUBLIC_REPOSITORY_URL = "https://github.com/rylogix/thread";
 
 const workspaceRowSchema = z.object({
   id: z.string(), name: z.string(), objective: z.string(), description: z.string(), deadline: z.string(),
@@ -51,7 +52,11 @@ export default {
     const path = pathForLogs(url.pathname);
     let response: Response;
     try {
-      response = url.pathname.startsWith("/api/") ? await handleApi(request, env, url) : await env.ASSETS.fetch(request);
+      if (url.pathname === "/repo" && (request.method === "GET" || request.method === "HEAD")) {
+        response = Response.redirect(PUBLIC_REPOSITORY_URL, 302);
+      } else {
+        response = url.pathname.startsWith("/api/") ? await handleApi(request, env, url) : await env.ASSETS.fetch(request);
+      }
     } catch (error) {
       if (error instanceof RequestError) {
         response = jsonError(error.code, error.message, error.status);

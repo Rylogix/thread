@@ -1,10 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { createDemoWorkspace } from "../src/domain/seed";
-import { isCrossSiteMutation, pathForLogs, validateWorkspaceIntegrity } from "../worker/index";
+import worker, { isCrossSiteMutation, pathForLogs, PUBLIC_REPOSITORY_URL, validateWorkspaceIntegrity } from "../worker/index";
 
 const workspaceId = "70000000-0000-4000-8000-000000000007";
 
 describe("Worker workspace integrity boundary", () => {
+  it("redirects the canonical source route to the exact public repository", async () => {
+    const assets = { fetch: () => Promise.reject(new Error("assets should not handle /repo")) };
+    const env = { ASSETS: assets } as unknown as Env;
+    const response = await worker.fetch(new Request("https://thread.rylogix.com/repo?ignored=1"), env);
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(PUBLIC_REPOSITORY_URL);
+    expect(PUBLIC_REPOSITORY_URL).toBe("https://github.com/rylogix/thread");
+  });
+
   it("accepts the migrated demo workspace", () => {
     expect(validateWorkspaceIntegrity(createDemoWorkspace(workspaceId))).toEqual([]);
   });
